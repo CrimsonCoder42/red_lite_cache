@@ -31,3 +31,9 @@ coverage.out
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 /examples/*.md
+
+# moved-not-deleted (Devin empties it)
+/_delete/
+
+# work-folder profiles and traces
+/doc/*/out/

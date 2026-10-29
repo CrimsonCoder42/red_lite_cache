@@ -63,7 +63,6 @@ second reader) ships at the end of S3 and is the first tag.
 
 ## Pending decisions (ask before S1)
 
-- D-001 Module path and GitHub repo name.
 - D-002 `sync.Map` vs `map`+`RWMutex` for the sheet store.
 - D-003 Expiry: lazy-on-read + janitor interval.
 - D-010 Protocol versioning: a `version` field on `open`, or a path (`/ws/v1`).

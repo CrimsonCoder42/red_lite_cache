@@ -42,3 +42,17 @@ v1-compatible so a reader swap in `backendAdvo` is the only consumer change.
 
 **Consequences**
 Everything is rebuilt and must be re-tested. The reference is read-only. Pending: D-001 to D-010 in SCOPE.md.
+
+## D-001 Module path and repository (2026-10-29, accepted)
+
+**Context**
+Every import path and the consumer pin in backendAdvo depend on it.
+
+**Chosen**
+`github.com/CrimsonCoder42/red_lite_cache`, public repo, default branch `main`. First tag `v0.0.1` (S0 scaffold, no behavior).
+
+**Alternatives + why lost**
+- Private repo: needs GOPRIVATE + credentials on every machine and CI that builds backendAdvo. Raw transcripts in `examples/` are kept out of git instead.
+
+**Consequences**
+Anything in git is public. `examples/*.md` stays untracked; never commit secrets or transcripts.

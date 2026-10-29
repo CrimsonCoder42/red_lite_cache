@@ -1,5 +1,13 @@
 # Changelog
 
+- 2026-10-29 — purpose + agent prompt: `doc/purpose.md` (backendAdvo usage researched: call-site counts, 3 instances on one
+  sheet, R1–R12 from `backendAdvo/cache/store.go:8-87`); `.claude/prompts/request.md` (request header adapted from the
+  advomedix one: dependency + migration checkpoints replace SQLC, CONTRACTS replace the uniform contract, seven
+  integration loops replace CRUD/UI loops). `doc/protocol/wire.md`: `ttl` (minutes) added to `set` and the
+  compatibility list — it was missing. Delete policy switched to move-to-`_delete/` in CLAUDE.md to match.
+
+- 2026-10-29 — published: github.com/CrimsonCoder42/red_lite_cache (public), `main` @ 71534ec, tag v0.0.1. D-001 accepted.
+
 - 2026-10-29 — reference knowledge: `examples/` (4 raw transcripts, Devin) indexed by `examples/README.md`;
   `doc/reference/codeheim_patterns.md` (46 code-heim repos cloned and read; two found not to compile:
   go_82 both servers miss `import "sync"`); `doc/reference/distributed_cache.md` (Anthony GG stream

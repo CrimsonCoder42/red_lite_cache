@@ -2,6 +2,9 @@
 
 Single Go module. Repo root: `/Users/devinanderson/Desktop/red_lite_cache`. Module: `github.com/CrimsonCoder42/red_lite_cache`. Go 1.27 (the same toolchain as `advomedix-v2/backendAdvo`).
 
+**Purpose: `doc/purpose.md` — read it first.** It names the one consumer (backendAdvo), the API it really
+calls, and requirements R1–R12 taken from its workarounds. Every change says which R# or K# it serves.
+
 **What this is.** The successor to `advomedix-v2/advo_cache`: a multi-tenant WebSocket cache
 with an embeddable Go reader, leader/replica replication, distributed locks, and (new) PostgreSQL
 write-behind persistence. Consumers `go get` it from GitHub; `backendAdvo` is the first.
@@ -109,24 +112,23 @@ Lives in `/doc`. `doc/README.md` is the index.
 - The checker: on HIGH risk work and every multi-agent run, the `reviewer` subagent runs in a fresh context with only
   the spec's acceptance criteria and `git diff -- <owned paths>`. It runs the covering tests against each criterion
   first, then reviews the diff.
-- Agents list their deletes; the lead runs them after the wave's full suite is green (## Delete policy).
+- Agents list their deletes; the lead runs them after the wave's full suite is green (## Delete policy
+The one copy. `.claude/prompts/request.md` → DELETE POLICY carries the same text; every other file points here.
 
-## Delete policy
-The one copy. Every other file points here and does not restate it.
-
-Git stays read-only. A delete is one plain command: `rm <path> [<path> ...]` with literal absolute or repo-relative paths; no `cd` in the same command, no variables, no `find -delete`, no `xargs`, no shell `-c`, no script.
-`.claude/hooks/rm-guard.sh` checks every delete. A blocked delete is final: never try another way; report it under LEFT FOR DEVIN with the guard's reason.
-- **TEST OUTPUT, any time** (`rm -r` allowed, never `rm -rf`): `testing/runs`, `.DS_Store`, `*.swp`, `coverage.out`, `bin/`.
+Git stays read-only. **Nothing is deleted.** A "delete" is one plain move: `mv -n <path> _delete/<same repo-relative path>`,
+one file per command, literal paths, no `cd` in the same command, no variables, no `find`, no `xargs`, no shell `-c`;
+`mkdir -p` the target folder first. `_delete/` is gitignored and Devin empties it. `rm` is never used;
+`.claude/hooks/rm-guard.sh` blocks it, and a block is final: report the path under LEFT FOR DEVIN.
+- **RUN OUTPUT, every run:** `testing/runs/*`, `<work folder>/out/*`, `coverage.out`, `bin/`, `.DS_Store`, `*.swp`.
 - **PROBES, when promoted or no longer needed:** `testing/_probe/<file>` (never `TEMPLATE.sh`, never `TEMPLATE_test.go`).
-- **OBSOLETE FILES, after tests:** a tracked, unmodified NON-SOURCE file this request made obsolete (a folded doc, a
-  fixed handoff, a one-off .md). grep proves nothing references it → `rm`, one file per path → `go build ./...` + the
-  covering test → anything red: restore with `git show HEAD:<path>` and the Write tool, re-run, report NOT DELETED.
-- **SOURCE FILES** (`.go .sql .sh` and the like) are never deleted by an agent. One this request made obsolete goes to
-  LEFT FOR DEVIN with the grep that shows nothing references it.
-- **NEVER, list for Devin:** untracked files outside the folders above, files with uncommitted edits, folders of source,
-  `db/migration/**`, and everything the guard protects.
-- Only what this request created or made obsolete. Never comment out or empty a file instead of deleting it. Never delete to make a test pass.
-- Report every delete: DELETED (path | class | why) and LEFT FOR DEVIN (path | why).
+- **OBSOLETE FILES, after tests:** a tracked, unmodified file this request made obsolete. grep proves nothing references
+  it (paste the grep) → `mv -n` it to `_delete/` → `go build ./...` + its covering test → anything red: `mv -n` it back,
+  report NOT MOVED. Source files (`.go .sql .sh`) follow the same order; one `go build` rejects goes back to LEFT FOR DEVIN.
+- **NEVER, list for Devin:** files with uncommitted edits, folders of source, `db/migration/**`, env files, `.git`, `.claude`,
+  `examples/`, `deploy/`, `go.mod`, `go.sum`, `testing/run.sh`, `TEMPLATE.*`, `doc/purpose.md`, `doc/protocol/wire.md`,
+  the four ledgers, anything under `advomedix-v2`.
+- Only what this request created or made obsolete. Never comment out or empty a file instead of moving it. Never move a file to make a test pass.
+- Report every move: MOVED TO _delete/ (path | class | why) and NOT MOVED / LEFT FOR DEVIN (path | why).
 
 ## Logging
 - One logger: `internal/logger` wraps `log/slog`. Package code calls `logger.L` (`*slog.Logger`). Never `fmt.Print*`,
@@ -143,6 +145,8 @@ Git stays read-only. A delete is one plain command: `rm <path> [<path> ...]` wit
 
 ## Context map
 - `.claude/rules/backend/go-*.md` auto-load by path (frontmatter `paths:`).
+- `.claude/prompts/request.md` — the full request header Devin pastes under a request (parallel rules, contracts, loops,
+  checkpoints, final report). It and this file must agree; a change to one is a change to both.
 - Skills in `.claude/skills/`: `/work <request>` — every task starts here · `/probe <action>` — runtime evidence when no test covers it · `/cleanup` — end of every track.
 - `.claude/agents/reviewer.md` — the checker.
 

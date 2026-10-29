@@ -13,7 +13,7 @@ client frames carry `type` or are a direct reply with `success`.
 |---|---|---|
 | `open` | `sheet`, `password` | `{success, sheet}` then a `sheet_state` frame; wrong password closes the socket |
 | `get` | `key` | `{success, key, value}` or `{success:false, error:"key not found"}` |
-| `set` | `key`, `value`, `jitter?` | `{success, key}`; broadcasts `replicate` |
+| `set` | `key`, `value`, `ttl?` (minutes, int; 0/absent = server default), `jitter?` | `{success, key}`; broadcasts `replicate`. **The v1 reader sends this fire-and-forget and never reads the reply** (`advo_cache/reader/reader.go:228`) |
 | `set_null` | `key` | `{success, key}` |
 | `delete` | `key` | `{success, key, deleted}`; broadcasts `invalidate{key}` |
 | `delete_prefix` | `prefix` | `{success, deleted}`; broadcasts `invalidate{prefix}` |
@@ -56,7 +56,7 @@ Every action except `open` and `register_replica` is rejected until a sheet is o
 Fields a shipped reader (`advo_cache/reader/reader.go`, pinned by `backendAdvo`) decodes. **Never
 rename, remove or retype any of these:**
 
-`action, type, success, error, sheet, password, key, value, prefix, suffix, jitter, lock_ttl,
+`action, type, success, error, sheet, password, key, value, ttl, prefix, suffix, jitter, lock_ttl,
 deleted, count, data, sheets, instance_id, started_at, owner`
 
 ## Changes since v1

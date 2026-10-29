@@ -2,6 +2,7 @@
 
 | File | What it holds |
 |---|---|
+| `purpose.md` | Why this exists: the one consumer, the API it really calls, requirements R1–R12 from its workarounds |
 | `scope/SCOPE.md` | What we are building, the slices, their status |
 | `specs/<feature>.md` | One spec per slice, from `specs/TEMPLATE.md` |
 | `DECISIONS.md` | Every load-bearing choice (D-ids) with the alternative that lost |
