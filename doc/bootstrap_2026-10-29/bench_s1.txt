@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/CrimsonCoder42/red_lite_cache/internal/cache
+cpu: Apple M1 Pro
+BenchmarkStoreGetParallel-10           	 8216666	       157.6 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreGetParallel-10           	 7732028	       146.3 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreGetParallel-10           	 7856728	       160.1 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreGetParallel-10           	 7549093	       157.0 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreGetParallel-10           	 7751688	       153.8 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreGetParallel-10           	 7550349	       156.3 ns/op	       5 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	27733214	        44.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	27217416	        43.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	26805733	        43.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	26596579	        43.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	27034536	        42.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                   	26895778	        44.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3913	    306522 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3763	    339574 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3914	    309122 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3924	    300961 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3598	    320782 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixIndexed-10        	    3901	    302476 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     710	   1754784 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     699	   1727699 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     686	   1761383 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     709	   1751587 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     670	   1744093 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixNaive-10          	     718	   1700361 ns/op	  100672 B/op	      11 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61707	     19363 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61402	     19557 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61764	     19562 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61264	     19770 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61477	     19500 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissIndexed-10    	   61531	     19577 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	     936	   1162643 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	    1077	   1246477 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	    1029	   1169531 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	    1102	   1129342 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	    1087	   1106447 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDeletePrefixMissNaive-10      	    1077	   1128854 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/CrimsonCoder42/red_lite_cache/internal/cache	63.457s
+goos: darwin
+goarch: arm64
+pkg: github.com/CrimsonCoder42/red_lite_cache/internal/sheet
+cpu: Apple M1 Pro
+BenchmarkApplySet3Collaborators-10    	 1761169	       666.5 ns/op	     582 B/op	       7 allocs/op
+BenchmarkApplySet3Collaborators-10    	 1821309	       658.0 ns/op	     582 B/op	       7 allocs/op
+BenchmarkApplySet3Collaborators-10    	 1821764	       655.0 ns/op	     582 B/op	       7 allocs/op
+BenchmarkApplySet3Collaborators-10    	 1834026	       655.6 ns/op	     582 B/op	       7 allocs/op
+BenchmarkApplySet3Collaborators-10    	 1816473	       659.2 ns/op	     582 B/op	       7 allocs/op
+BenchmarkApplySet3Collaborators-10    	 1809415	       664.1 ns/op	     582 B/op	       7 allocs/op
+PASS
+ok  	github.com/CrimsonCoder42/red_lite_cache/internal/sheet	7.436s

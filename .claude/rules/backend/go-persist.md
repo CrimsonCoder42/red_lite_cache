@@ -29,7 +29,8 @@ restart and the audit trail a project owner can export. Every rule follows from 
 - A batch is one transaction. A failed flush is logged at Error and the batch is **retried once** on the
   next tick, then dropped with a count. Never spin.
 - Deletes and sets for the same key in one batch collapse to the last op. A prefix delete is an SQL
-  `DELETE ... WHERE key LIKE $1 || '%'`, never a loaded-then-deleted loop.
+  `DELETE ... WHERE starts_with(key, $1)`, never `LIKE $1 || '%'` (keys contain `_` and `%` freely; LIKE would
+  treat them as wildcards) and never a loaded-then-deleted loop.
 
 ## Schema
 

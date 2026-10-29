@@ -1,0 +1,57 @@
+version: "2"
+# One block per query package (D-015), the shape backendAdvo/sqlc.yaml uses. Generated code lands in
+# db/sqlc/<pkg> and is never hand-edited; `make sqlc` regenerates it.
+sql:
+  # Registry: projects, api_keys, sheets (S6)
+  - schema: "./db/migration"
+    queries: "./db/query/registry"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "registry"
+        out: "./db/sqlc/registry"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        emit_empty_slices: true
+        overrides: &overrides
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+          # jsonb -> json.RawMessage, as in backendAdvo: without it the value is []byte and
+          # encoding/json emits it as a base64 string instead of the JSON it holds.
+          - db_type: "jsonb"
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
+
+  # Cache entries: the write-behind copy (S5)
+  - schema: "./db/migration"
+    queries: "./db/query/entries"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "entries"
+        out: "./db/sqlc/entries"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        emit_empty_slices: true
+        overrides: *overrides
+
+  # Cluster: the fencing epoch (D-012)
+  - schema: "./db/migration"
+    queries: "./db/query/cluster"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "cluster"
+        out: "./db/sqlc/cluster"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        emit_empty_slices: true
+        overrides: *overrides

@@ -1,0 +1,26 @@
+# .air.toml — live reload for the leader (D-018, after backendAdvo/.air.toml).
+# `air` in this folder runs one leader on REDLITE_PORT (default :8091, from .env or the environment).
+# `make dev-pair` runs this config twice with -build.cmd/-build.bin overridden so the leader and the
+# replica build separate binaries.
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/main ./cmd/redlite"
+  bin = "./tmp/main"
+  include_ext = ["go", "sql"]
+  exclude_dir = ["tmp", "testing", "examples", "doc", "_delete", "bin"]
+  exclude_regex = ["_test.go"]
+  delay = 500
+  kill_delay = "2s"   # time for graceful shutdown (SIGINT → drain → persist flush)
+  send_interrupt = true
+
+[color]
+  app = "cyan"
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+
+[misc]
+  clean_on_exit = true

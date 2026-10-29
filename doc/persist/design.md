@@ -1,5 +1,27 @@
 # Persistence — design (distilled)
 
+## What shipped (bootstrap 2026-10-29)
+
+_Code wins where it differs from the draft below; differences are listed._ Unverified against a real
+Postgres on this machine: every DB test SKIPPED (no `REDLITE_TEST_DATABASE_URL`).
+
+- **Schema** `db/migration/000001_init.up.sql`: `projects` (+ seeded `default` project for autocreated
+  sheets), `api_keys`, `sheets` (bcrypt hash, project_id; name globally unique), `cache_entries`
+  (UNLOGGED, `project_id` + `sheet` + `key`, `expires_at` **nullable** = no expiry, FK to `sheets`),
+  `cluster_state` (epoch). `audit_events` is the proposed `000002` pair (`doc/bootstrap_2026-10-29/000002_audit.proposed.sql`, D-019).
+- **Writer** `internal/persist/writer.go`: one goroutine, bounded channel (`REDLITE_PERSIST_QUEUE_SIZE`),
+  non-blocking enqueue (full → drop + rate-limited Warn), flush on batch size or interval in one
+  transaction, collapsed per key (`plan.go`), retried once then dropped with an Error. Sheet creates are
+  never dropped (parked and flushed first) so the FK cannot poison a batch. Only the leader writes.
+- **Prefix/suffix deletes** use `starts_with()` / `right()` — not `LIKE`, which `_`/`%` in a key would widen.
+- **Hydration** before the listener (`internal/app/wire_replica.go`, leader only): every sheet with its
+  hash, then live rows per sheet; expired rows are not loaded.
+- **Cleaner** one goroutine, `DELETE … LIMIT 10000` per `REDLITE_PERSIST_CLEANUP_INTERVAL`.
+- **Epoch** `cluster_state` via `RaiseEpoch` (never goes backwards) on boot and promotion.
+- **Migrations** embedded (`db/store.go`, iofs) and applied at boot by golang-migrate's pgx v5 driver.
+- Decisions: D-013, D-015, D-019…D-022; open questions below are answered: a project owns many sheets;
+  quota columns exist but are not enforced yet (`doc/TODO.md`).
+
 _Source: `advomedix-v2/advo_cache/CACHE_PERSISTENCE_REPORT.md` (Devin-confirmed decisions, 2026-10). This
 is the short version the S5 spec is written from. Rules are in `.claude/rules/backend/go-persist.md`._
 

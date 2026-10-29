@@ -13,6 +13,16 @@
         ]
       },
       {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/migration-guard.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -90,7 +100,26 @@
       "Bash(tr:*)",
       "Bash(uniq:*)",
       "Bash(wc:*)",
-      "Bash(websocat:*)"
+      "Bash(websocat:*)",
+      "Bash(go get github.com/coder/websocket:*)",
+      "Bash(go get github.com/jackc/pgx/v5:*)",
+      "Bash(go get golang.org/x/sync:*)",
+      "Bash(go get golang.org/x/crypto:*)",
+      "Bash(go get github.com/google/uuid:*)",
+      "Bash(go get github.com/golang-migrate/migrate/v4:*)",
+      "Bash(go get golang.org/x/time:*)",
+      "Bash(sqlc generate:*)",
+      "Bash(sqlc generate)",
+      "Bash(sqlc vet:*)",
+      "Bash(sqlc compile:*)",
+      "Bash(sqlc version)",
+      "Bash(which:*)",
+      "Bash(air -v)",
+      "Bash(benchstat:*)",
+      "Bash(timeout:*)",
+      "Bash(gtimeout:*)",
+      "Bash(lsof -i:*)",
+      "Bash(nc -z:*)"
     ],
     "deny": [
       "Edit(//Users/devinanderson/Desktop/advo_production/**)",
@@ -110,14 +139,10 @@
       "Bash(rmdir:*)",
       "Bash(unlink:*)",
       "Read(.env)",
-      "Read(.env.*)",
-      "Read(*.env)",
       "Read(**/.env)",
-      "Read(**/.env.*)",
       "Read(**/secrets/**)",
       "Read(//Users/devinanderson/Desktop/red_lite_cache/bin/**)",
       "Read(//Users/devinanderson/Desktop/red_lite_cache/tmp/**)",
-      "Edit(//Users/devinanderson/Desktop/red_lite_cache/db/migration/**)",
       "Edit(//Users/devinanderson/Desktop/red_lite_cache/.github/workflows/**)",
       "Edit(/.claude/settings.json)",
       "Edit(/.claude/hooks/rm-guard.sh)",
@@ -133,7 +158,6 @@
       "Bash(docker:*)",
       "Bash(docker-compose:*)",
       "Bash(go mod vendor:*)",
-      "Bash(go get:*)",
       "Bash(go install:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
@@ -173,7 +197,17 @@
       "Bash(pkill:*)",
       "Bash(kill:*)",
       "Bash(killall:*)",
-      "Bash(wget:*)"
+      "Bash(wget:*)",
+      "Bash(sqlc push:*)",
+      "Bash(sqlc upload:*)",
+      "Bash(sqlc createdb:*)",
+      "Read(.env.local)",
+      "Read(.env.production)",
+      "Read(.env.development)",
+      "Read(.env.staging)",
+      "Read(**/.env.local)",
+      "Read(**/.env.production)",
+      "Read(**/app.env)"
     ]
   }
 }

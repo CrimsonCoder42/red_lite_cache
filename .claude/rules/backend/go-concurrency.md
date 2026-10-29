@@ -47,8 +47,8 @@ Reasoning about a race is not evidence. Run `-race`.
 go run -race .
 ```
 
-Any code introducing shared state gets `go test -race ./<package>/...` on the package touched before it is called done,
-once that package's tests compile. Never `./...` (see CLAUDE.md Testing). If the package has no compiling tests, say so in the report.
+Any code introducing shared state gets `go test -race ./<package>/...` on the package touched before it is called done.
+`./...` is fine here: nothing opens a real database without `REDLITE_TEST_DATABASE_URL` (CLAUDE.md Testing). If the package has no compiling tests, say so in the report.
 
 ## WaitGroups
 

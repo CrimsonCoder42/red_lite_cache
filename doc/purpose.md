@@ -57,6 +57,25 @@ it. This table is the acceptance list for S3 (reader) and S7 (migration).
 | R11 | Sheets cannot collide across environments | one sheet name for every DB | TODO (`main.go:98-104`) | S2 (sheet naming / D-id) |
 | R12 | Sheet credentials are not a shared literal | `CACHE_PASSWORD=secret` in the deploy workflow (`deploy-backendadvo-production.yml:142`) | none | S6 / advomedix (FOUND, NOT FIXED there) |
 
+### Status — bootstrap 2026-10-29
+
+`bash testing/run.sh` (-race). Integration tests run against a real leader (and replica) on a free port.
+
+| # | Status | Test that fails on advo_cache and passes here | Consumer code it lets go (S7) |
+|---|---|---|---|
+| R1 | met | `TestReconnectForever`, `TestDisconnectLoop`; `reader` `TestR1ReconnectForever` | the G-01-15 note; `/health` recovers by itself |
+| R2 | met (D-005) | `TestDisconnectLoop`; `reader` `TestR2DeletesQueuedAndReplayed`, `TestR2QueueOverflowCollapses` | DROPPED SWEEPS queue, `sweepPrefix` error path |
+| R3 | met | `TestDisconnectLoop`; `reader` `TestR3DisconnectedReadsMiss` | `linkReady()` gate |
+| R4 | met (D-008) | `TestKeyLoop`; `reader` `TestR4ExpiryAndBound` | the ADVO_CACHE §2 caveat |
+| R5 | met (D-003) | `TestKeyLoop` (invalidate{keys}); `internal/sheet` `TestRunJanitor` | "never rely on a TTL" caveat (§3) |
+| R6 | met (D-023) | `TestRaceLoop` (prefix, exact, suffix, two_misses_one_reader, stress) | the second sweep 2 s later (G-01-16) |
+| R7 | met | `internal/cache` `BenchmarkDeletePrefixIndexed` 313 µs vs naive 1740 µs at 100k keys (`doc/bootstrap_2026-10-29/bench_s1.txt`) | "sweep once per write" caveat (§4) |
+| R8 | met (D-016) | `reader` `TestR8TypedIsolatedGet` | the double JSON pass in `Store.Get` — **`Get(key, &target) bool` is the one signature change** |
+| R9 | met | `reader` `TestR9AckedSet`; `TestRaceLoop` (ErrStale) | — |
+| R10 | met | `TestNewWhileLeaderDown`; `reader` `TestR10NewWhileDown` | `Logger.Fatal("cannot connect to cache")` |
+| R11 | met by the registry | `TestAutocreateOffRegistryPath` — one sheet per environment, created by the admin API | the `main.go:98-104` TODO |
+| R12 | server side met | `TestAutocreateOffRegistryPath` (a project's sheet password + API key issued, not a literal) | the deploy workflow still carries `CACHE_PASSWORD=secret` — FOUND, NOT FIXED in advomedix-v2 |
+
 ## What success looks like
 
 - backendAdvo swaps the import (`advo_cache/reader` → `red_lite_cache/reader`), pins a tag, and **deletes**

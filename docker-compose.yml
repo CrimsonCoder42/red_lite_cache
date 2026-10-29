@@ -1,24 +1,57 @@
-# Local two-node run. Production placement (NUC leader, DO replica over Tailscale) lives in
-# advomedix-v2/deploy once S4 ships; this file is for development only.
+# Local three-service run: postgres + leader + replica. Development only — production placement
+# (NUC leader, DO replica over Tailscale) lives in advomedix-v2/deploy.
+# Ports 8091/8092 (never 8081/8082: a local advo_cache may be there). Postgres on host 5433.
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: redlite_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres # dev only
+      POSTGRES_DB: redlite
+    ports: ["5433:5432"]
+    volumes: ["redlite_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d redlite"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   leader:
     build: .
     container_name: redlite-leader
-    ports: ["8081:8081"]
+    ports: ["8091:8091"]
     environment:
-      REDLITE_PORT: ":8081"
+      REDLITE_PORT: ":8091"
       REDLITE_ROLE: leader
+      REDLITE_INSTANCE_ID: leader
+      REDLITE_PEER_ADDRESS: ws://replica:8092
       REDLITE_ENVIRONMENT: development
+      REDLITE_PERSIST_ENABLED: "true"
+      REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
+      REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
+    depends_on:
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
   replica:
     build: .
     container_name: redlite-replica
-    ports: ["8082:8082"]
+    ports: ["8092:8092"]
     environment:
-      REDLITE_PORT: ":8082"
+      REDLITE_PORT: ":8092"
       REDLITE_ROLE: replica
-      REDLITE_LEADER_ADDRESS: ws://leader:8081/ws
+      REDLITE_INSTANCE_ID: replica
+      REDLITE_LEADER_ADDRESS: ws://leader:8091/replica
+      REDLITE_PEER_ADDRESS: ws://leader:8091
       REDLITE_ENVIRONMENT: development
-    depends_on: [leader]
+      # Shares the database: only the node that is leader writes to it (gated on role).
+      REDLITE_PERSIST_ENABLED: "true"
+      REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
+      REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
+    depends_on:
+      leader: { condition: service_started }
     restart: unless-stopped
+
+volumes:
+  redlite_pg:
