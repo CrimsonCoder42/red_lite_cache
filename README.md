@@ -9,11 +9,11 @@ promotion, distributed locks, and PostgreSQL write-behind persistence. The succe
 ## Quick start
 
 ```bash
-air                  # one leader on :8091 with live reload (reads .env if present)
-make dev-pair        # leader :8091 + replica :8092 under air
+air                  # one leader on :8095 with live reload (reads .env if present)
+make dev-pair        # leader :8095 + replica :8096 under air
 docker compose up    # postgres + leader + replica, persistence on, admin key "dev-admin-key"
 bash testing/run.sh  # every package under -race, logged to testing/runs/
-curl localhost:8091/health   # {"status":"ok","role":"leader","epoch":1,"instance_id":"..."}
+curl localhost:8095/health   # {"status":"ok","role":"leader","epoch":1,"instance_id":"..."}
 ```
 
 Never :8081/:8082 — those are left for a local advo_cache.
@@ -24,8 +24,8 @@ Never :8081/:8082 — those are left for a local advo_cache.
 import "github.com/CrimsonCoder42/red_lite_cache/reader"
 
 r, err := reader.New(reader.Config{
-    LeaderAddr: "ws://localhost:8091/ws",
-    BackupAddr: "ws://localhost:8092/ws", // optional: the replica, used after a promotion
+    LeaderAddr: "ws://localhost:8095/ws",
+    BackupAddr: "ws://localhost:8096/ws", // optional: the replica, used after a promotion
     Sheet:      "patient-access",
     Password:   os.Getenv("CACHE_PASSWORD"),
 })
@@ -47,11 +47,11 @@ _ = r.DeletePrefix(ctx, "patient:"+id) // never dropped: queued and replayed if 
 ## A second project, no code change
 
 ```bash
-curl -H "Authorization: Bearer $REDLITE_ADMIN_KEY" -d '{"name":"clinic-b"}' localhost:8091/admin/projects
+curl -H "Authorization: Bearer $REDLITE_ADMIN_KEY" -d '{"name":"clinic-b"}' localhost:8095/admin/projects
 # → {"project_id":"…","api_key":"rlk_…"}   (shown once)
 curl -H "Authorization: Bearer rlk_…" -d '{"name":"clinic-b-prod","password":"…"}' \
-     localhost:8091/admin/projects/<project_id>/sheets
-curl -H "Authorization: Bearer rlk_…" localhost:8091/admin/sheets/clinic-b-prod/export
+     localhost:8095/admin/projects/<project_id>/sheets
+curl -H "Authorization: Bearer rlk_…" localhost:8095/admin/sheets/clinic-b-prod/export
 ```
 
 ## Docs

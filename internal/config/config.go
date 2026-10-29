@@ -91,7 +91,7 @@ func Load(dir string) (Config, error) {
 func build(lookup func(string) (string, bool)) (Config, error) {
 	e := &env{lookup: lookup}
 	c := Config{
-		Port:                   e.str("REDLITE_PORT", ":8091"),
+		Port:                   e.str("REDLITE_PORT", ":8095"),
 		Environment:            e.str("REDLITE_ENVIRONMENT", "development"),
 		Role:                   e.str("REDLITE_ROLE", "leader"),
 		LeaderAddr:             e.str("REDLITE_LEADER_ADDRESS", ""),

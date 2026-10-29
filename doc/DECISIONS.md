@@ -154,7 +154,7 @@ See D-003; recorded separately because SCOPE K3 cites it.
 
 ## D-018 Dev loop mirrors the consumer's (2026-10-29, accepted)
 
-**Chosen** `.air.toml` (build `./cmd/redlite` into `./tmp/main`, exclude `_test.go`); Makefile with the consumer's target names (server, dev, test, sqlc, migrateup, migratedown, createdb, dropdb, postgres, network, db_reset, fresh_start) plus `dev-pair` (leader :8091 + replica :8092, two airs with separate binaries) and `bench`; `docker-compose.yml` with postgres + leader + replica.
+**Chosen** `.air.toml` (build `./cmd/redlite` into `./tmp/main`, exclude `_test.go`); Makefile with the consumer's target names (server, dev, test, sqlc, migrateup, migratedown, createdb, dropdb, postgres, network, db_reset, fresh_start) plus `dev-pair` (leader :8095 + replica :8096, two airs with separate binaries) and `bench`; `docker-compose.yml` with postgres + leader + replica.
 **Alternatives + why lost** A bespoke script — a second set of names to remember across the two repos.
 
 ## D-019 Postgres role: control plane + durable copy, never the read/write path (2026-10-29, accepted — Devin, bootstrap.md)

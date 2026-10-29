@@ -1,6 +1,6 @@
 # Local three-service run: postgres + leader + replica. Development only — production placement
 # (NUC leader, DO replica over Tailscale) lives in advomedix-v2/deploy.
-# Ports 8091/8092 (never 8081/8082: a local advo_cache may be there). Postgres on host 5433.
+# Ports 8095/8096 (never 8081/8082: a local advo_cache may be there). Postgres on host 5433.
 services:
   postgres:
     image: postgres:17-alpine
@@ -20,12 +20,12 @@ services:
   leader:
     build: .
     container_name: redlite-leader
-    ports: ["8091:8091"]
+    ports: ["8095:8095"]
     environment:
-      REDLITE_PORT: ":8091"
+      REDLITE_PORT: ":8095"
       REDLITE_ROLE: leader
       REDLITE_INSTANCE_ID: leader
-      REDLITE_PEER_ADDRESS: ws://replica:8092
+      REDLITE_PEER_ADDRESS: ws://replica:8096
       REDLITE_ENVIRONMENT: development
       REDLITE_PERSIST_ENABLED: "true"
       REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
@@ -37,13 +37,13 @@ services:
   replica:
     build: .
     container_name: redlite-replica
-    ports: ["8092:8092"]
+    ports: ["8096:8096"]
     environment:
-      REDLITE_PORT: ":8092"
+      REDLITE_PORT: ":8096"
       REDLITE_ROLE: replica
       REDLITE_INSTANCE_ID: replica
-      REDLITE_LEADER_ADDRESS: ws://leader:8091/replica
-      REDLITE_PEER_ADDRESS: ws://leader:8091
+      REDLITE_LEADER_ADDRESS: ws://leader:8095/replica
+      REDLITE_PEER_ADDRESS: ws://leader:8095
       REDLITE_ENVIRONMENT: development
       # Shares the database: only the node that is leader writes to it (gated on role).
       REDLITE_PERSIST_ENABLED: "true"
