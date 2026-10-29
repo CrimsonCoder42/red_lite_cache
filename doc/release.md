@@ -75,10 +75,10 @@ Remove the `replace` before committing.
 ## Running the server
 
 ```bash
-air                     # leader on :8091 (live reload)
-make dev-pair           # leader :8091 + replica :8092, each fencing the other
+air                     # leader on :8095 (live reload)
+make dev-pair           # leader :8095 + replica :8096, each fencing the other
 docker compose up       # postgres + leader + replica, persistence on
 ```
 
-Ports are :8091/:8092 so a local advo_cache on :8081/:8082 is never touched. Configuration:
+Ports are :8095/:8096 so a local advo_cache on :8081/:8082 is never touched. Configuration:
 `doc/bootstrap_2026-10-29/env.example.proposed` (until it replaces `.env.example`).

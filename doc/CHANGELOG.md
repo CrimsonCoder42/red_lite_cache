@@ -43,7 +43,7 @@
   `protocol/messages.go` (every v1 frame + id, version, protocol_version, epoch, seq, expires_in_ms, keys,
   base_seq, replica snapshot types) with `messages_test.go` pinning the v1 field names; `internal/logger`
   ReplaceAttr masking (password, password_hash, value, key_hash, api_key, database_url) + test;
-  `internal/config` without package globals, `Default()`, every new REDLITE_* (ports default :8091/:8092);
+  `internal/config` without package globals, `Default()`, every new REDLITE_* (ports default :8095/:8096);
   `db/migration/000001_init.{up,down}.sql`, `db/query/{registry,entries,cluster}`, `sqlc.yaml`, generated
   `db/sqlc/*`, `db/store.go` (Store + ExecTx + Batch + embedded Migrate); `.air.toml`, `Makefile`
   (backendAdvo target names + dev-pair + bench), two-stage `Dockerfile`, `docker-compose.yml`

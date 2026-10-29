@@ -1,5 +1,5 @@
 # .air.toml — live reload for the leader (D-018, after backendAdvo/.air.toml).
-# `air` in this folder runs one leader on REDLITE_PORT (default :8091, from .env or the environment).
+# `air` in this folder runs one leader on REDLITE_PORT (default :8095, from .env or the environment).
 # `make dev-pair` runs this config twice with -build.cmd/-build.bin overridden so the leader and the
 # replica build separate binaries.
 

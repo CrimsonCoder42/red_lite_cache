@@ -6,8 +6,8 @@ export
 DB_NAME        ?= redlite
 DB_CONTAINER   ?= redlite_db
 DB_URL         ?= postgres://postgres:postgres@localhost:5433/$(DB_NAME)?sslmode=disable
-LEADER_PORT    ?= :8091
-REPLICA_PORT   ?= :8092
+LEADER_PORT    ?= :8095
+REPLICA_PORT   ?= :8096
 
 .PHONY: network postgres createdb dropdb c_m migrateup migratedown sqlc test bench server dev \
         dev-pair dev-leader dev-replica clean db_start db_reset fresh_start build vet
@@ -66,11 +66,11 @@ bench:
 server:
 	go run ./cmd/redlite
 
-# One leader under air on REDLITE_PORT (default :8091).
+# One leader under air on REDLITE_PORT (default :8095).
 dev:
 	air
 
-# Leader :8091 + replica :8092 under air, each fencing the other through REDLITE_PEER_ADDRESS.
+# Leader :8095 + replica :8096 under air, each fencing the other through REDLITE_PEER_ADDRESS.
 # Never :8081/:8082 — a local advo_cache may be running there.
 dev-pair:
 	$(MAKE) -j2 dev-leader dev-replica
