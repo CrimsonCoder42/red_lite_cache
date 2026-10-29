@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-10-29 — advomedix-v2 read-only: `.claude/hooks/advomedix-readonly.sh` (PreToolUse Bash|Edit|Write|MultiEdit|NotebookEdit; 23 cases checked: 7 allow, 16 block), `settings.json` deny Edit/Write/NotebookEdit + secret reads on advo_production/**, `settings.local.json` `additionalDirectories` + Read allows for advo_cache, backendAdvo, .gitea/workflows, doc/backend. `rm`/`rmdir`/`unlink` moved from allow to deny (policy is `mv -n` to `_delete/`).
+
 - 2026-10-29 — purpose + agent prompt: `doc/purpose.md` (backendAdvo usage researched: call-site counts, 3 instances on one
   sheet, R1–R12 from `backendAdvo/cache/store.go:8-87`); `.claude/prompts/request.md` (request header adapted from the
   advomedix one: dependency + migration checkpoints replace SQLC, CONTRACTS replace the uniform contract, seven

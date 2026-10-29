@@ -3,9 +3,23 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/advomedix-readonly.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/rm-guard.sh", "timeout": 15 }
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/rm-guard.sh",
+            "timeout": 15
+          }
         ]
       }
     ],
@@ -13,7 +27,11 @@
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/go-check.sh", "timeout": 120 }
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/go-check.sh",
+            "timeout": 120
+          }
         ]
       }
     ]
@@ -65,8 +83,6 @@
       "Bash(mkdir -p:*)",
       "Bash(mv -n:*)",
       "Bash(printf:*)",
-      "Bash(rm:*)",
-      "Bash(rmdir:*)",
       "Bash(sed:*)",
       "Bash(sort:*)",
       "Bash(tail:*)",
@@ -74,13 +90,25 @@
       "Bash(tr:*)",
       "Bash(uniq:*)",
       "Bash(wc:*)",
-      "Bash(websocat:*)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/advo_cache/**)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/backendAdvo/cache/**)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/backendAdvo/CLAUDE.md)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/backendAdvo/go.mod)"
+      "Bash(websocat:*)"
     ],
     "deny": [
+      "Edit(//Users/devinanderson/Desktop/advo_production/**)",
+      "Write(//Users/devinanderson/Desktop/advo_production/**)",
+      "NotebookEdit(//Users/devinanderson/Desktop/advo_production/**)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/.env)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/.env.*)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/app.env)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/*.env)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/secrets/**)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/accounts.json)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/node_modules/**)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/vendor/**)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/db_backups/**)",
+      "Read(//Users/devinanderson/Desktop/advo_production/**/health_dumps/**)",
+      "Bash(rm:*)",
+      "Bash(rmdir:*)",
+      "Bash(unlink:*)",
       "Read(.env)",
       "Read(.env.*)",
       "Read(*.env)",
@@ -89,9 +117,6 @@
       "Read(**/secrets/**)",
       "Read(//Users/devinanderson/Desktop/red_lite_cache/bin/**)",
       "Read(//Users/devinanderson/Desktop/red_lite_cache/tmp/**)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/advo_cache/.env)",
-      "Read(//Users/devinanderson/Desktop/advo_production/advomedix-v2/backendAdvo/app.env)",
-      "Edit(//Users/devinanderson/Desktop/advo_production/advomedix-v2/**)",
       "Edit(//Users/devinanderson/Desktop/red_lite_cache/db/migration/**)",
       "Edit(//Users/devinanderson/Desktop/red_lite_cache/.github/workflows/**)",
       "Edit(/.claude/settings.json)",

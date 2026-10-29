@@ -13,7 +13,12 @@ write-behind persistence. Consumers `go get` it from GitHub; `backendAdvo` is th
 
 1. **`advo_cache`** — `/Users/devinanderson/Desktop/advo_production/advomedix-v2/advo_cache`, **read-only**.
    The direct predecessor. Read it for the shape of every feature and its wire protocol, cite the file:line,
-   then rebuild it here under the rules below. Never edit it. `CACHE_PERSISTENCE_REPORT.md` there is the
+   then rebuild it here under the rules below. Never edit it.
+   **advomedix-v2 is READ-ONLY from this project, enforced three ways:** `settings.json` denies Edit/Write/NotebookEdit
+   on it, `.claude/hooks/advomedix-readonly.sh` blocks any file-tool write and any Bash command naming it that is not
+   a read-only command (cat/grep/ls/sed -n/find without -delete/git log|show|diff/…, no redirect into it), and read
+   access is granted only in `settings.local.json` (`additionalDirectories`: advo_cache, backendAdvo, .gitea/workflows).
+   Secrets there (`.env`, `app.env`, `accounts.json`) are deny-read. A block is final — report it, never route around it. `CACHE_PERSISTENCE_REPORT.md` there is the
    research behind the persistence layer; `doc/persist/` carries the decisions that came out of it.
 2. **`doc/reference/`** — the outside ideas, distilled and checked: `distributed_cache.md` (Anthony GG's
    TCP leader/follower cache), `codeheim_patterns.md` (46 code-heim repos: sync.Map cache, memcache
