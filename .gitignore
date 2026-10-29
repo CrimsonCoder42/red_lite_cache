@@ -1,0 +1,33 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# build output
+/bin/
+/tmp/
+/redlite
+coverage.out
+
+# test output
+/testing/runs/*
+!/testing/runs/.gitkeep
+
+# probes (promoted or deleted, never shipped)
+/testing/_probe/*
+!/testing/_probe/.gitignore
+!/testing/_probe/TEMPLATE.sh
+!/testing/_probe/TEMPLATE_test.go
+
+# editor / os
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# claude local
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+/examples/*.md

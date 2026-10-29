@@ -1,0 +1,24 @@
+# Local two-node run. Production placement (NUC leader, DO replica over Tailscale) lives in
+# advomedix-v2/deploy once S4 ships; this file is for development only.
+services:
+  leader:
+    build: .
+    container_name: redlite-leader
+    ports: ["8081:8081"]
+    environment:
+      REDLITE_PORT: ":8081"
+      REDLITE_ROLE: leader
+      REDLITE_ENVIRONMENT: development
+    restart: unless-stopped
+
+  replica:
+    build: .
+    container_name: redlite-replica
+    ports: ["8082:8082"]
+    environment:
+      REDLITE_PORT: ":8082"
+      REDLITE_ROLE: replica
+      REDLITE_LEADER_ADDRESS: ws://leader:8081/ws
+      REDLITE_ENVIRONMENT: development
+    depends_on: [leader]
+    restart: unless-stopped

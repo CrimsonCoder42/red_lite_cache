@@ -1,0 +1,16 @@
+{
+  "go.toolsManagement.autoUpdate": true,
+  "go.useLanguageServer": true,
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "package",
+  "go.vetOnSave": "package",
+  "go.testFlags": ["-race", "-count=1"],
+  "go.buildFlags": [],
+  "gopls": { "ui.semanticTokens": true, "formatting.gofumpt": false },
+  "[go]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "golang.go",
+    "editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
+  },
+  "files.exclude": { "**/testing/runs": true, "**/bin": true }
+}

@@ -1,0 +1,5 @@
+# Probes are temporary: promoted into a covering test or deleted at /cleanup. Never committed.
+*
+!.gitignore
+!TEMPLATE.sh
+!TEMPLATE_test.go
