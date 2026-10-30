@@ -30,6 +30,7 @@ services:
       REDLITE_PERSIST_ENABLED: "true"
       REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
       REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
+      REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # D-031: same value on both nodes
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
@@ -49,6 +50,7 @@ services:
       REDLITE_PERSIST_ENABLED: "true"
       REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
       REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
+      REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # D-031: same value on both nodes
     depends_on:
       leader: { condition: service_started }
     restart: unless-stopped

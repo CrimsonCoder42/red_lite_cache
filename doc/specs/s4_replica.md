@@ -54,16 +54,31 @@ when the leader dies, and fence the old leader with an epoch so the pair never s
     following); a leader whose lock connection fails its ping steps down at once (Error
     `Persist: advisory lock lost`); a leader stepped down by the probe releases the lock. Epoch mode is
     unchanged.
+12. **D-031 peer auth** (tenancy 2026-10-29). `/replica` checks `Authorization: Bearer <REDLITE_CLUSTER_TOKEN>`
+    (`tenant.CheckBearer`, constant time) **before** the hub, `websocket.Accept` or any read: missing or wrong →
+    HTTP 401 `unauthorized`, Warn `Replica: peer refused` with `remote` and `reason` (`missing cluster token` /
+    `wrong cluster token`) only, zero snapshot bytes, no registration. The follower dial
+    (`websocket.DialOptions.HTTPHeader`) and the peer `/health` probe send the token; `/health` returns role,
+    epoch and instance id only with it, so the probe fences only between nodes sharing the token. A follower
+    refused 401 keeps retrying with its usual backoff (Warn `Replica: leader unreachable` on the first
+    attempt). An empty token disables the check (development; production refuses to boot — cmd/redlite exits 1
+    with one Error line).
+13. **Control frames** (D-027/D-028/D-030). The leader's `SendControl(protocol.ReplicaControl)` enqueues
+    `project_suspended` / `project_resumed` / `key_revoked` / `session_kill` (`project`, `key_id`, `session` ids
+    only, `epoch`) to every replica. The follower applies the usual epoch check (a lower epoch is a stale
+    leader frame: dropped with the connection), logs Info `Replica: control received`, and calls
+    `Options.OnControl` — it applies nothing itself (internal/app wires OnControl to the tenant directory and
+    session registry).
 
 ## Surface
 
 | Kind | Name | Package |
 |---|---|---|
 | func | `New(ctx, *sheet.Registry, Options) (*Node, error)` | internal/replica |
-| type | `Options{Role, LeaderAddr, PeerAddr, InstanceID, HeartbeatInterval, HeartbeatTimeout, SendQueue, MaxFrameBytes, PingInterval, WriteTimeout, Store, KickClients, OnPromote}` | internal/replica |
-| method | `IsLeader`, `Epoch`, `ObserveEpoch` (ws.Node); `Observe` (sheet.Observer); `ServeHTTP` (PathReplica); `Run(ctx) error`; `Role`, `Replicas` | internal/replica |
+| type | `Options{Role, LeaderAddr, PeerAddr, InstanceID, HeartbeatInterval, HeartbeatTimeout, SendQueue, MaxFrameBytes, PingInterval, WriteTimeout, Store, KickClients, OnPromote, ClusterToken, OnControl, Elector}` | internal/replica |
+| method | `IsLeader`, `Epoch`, `ObserveEpoch` (ws.Node); `Observe` (sheet.Observer); `ServeHTTP` (PathReplica); `Run(ctx) error`; `Role`, `Replicas`; `SendControl(protocol.ReplicaControl)` (leader) | internal/replica |
 | method | `(*App).Node() *replica.Node`, `Store() *db.Store`, `Writer() *persist.Writer` | internal/app |
-| func | harness `StartReplica`, `StartOn`, `Listen`, `Health`, `TryHealth` | testing/integration |
+| func | harness `StartReplica` (passes the leader's cluster token), `StartOn`, `Listen`, `Health` (sends the server's token), `TryHealth`, `TryHealthToken` | testing/integration |
 
 ## Value-source table
 
@@ -82,6 +97,8 @@ when the leader dies, and fence the old leader with an epoch so the pair never s
 | `expires_in_ms` | `Entry.ExpiresAt − now`, min 1 when set; 0/absent = no expiry | ✅ R4 |
 | `password_hash`, `project_id` | `Snapshot.PasswordHash/ProjectID`, `Op.PasswordHash/ProjectID` | ✅ D-013, K12 |
 | probe timeout | 1s constant | ✅ brief |
+| `Authorization` on dial / probe; check on `/replica` | `REDLITE_CLUSTER_TOKEN` (`Options.ClusterToken`); "" = not sent / not checked | ✅ D-031 |
+| control frame fields | `protocol.ReplicaControl` from the caller of `SendControl` (internal/api); `epoch` = leader epoch | ✅ D-027/D-028/D-030 |
 | dial backoff | 50ms doubling to 5s, full jitter, forever | ✅ R1 shape (agent assumption, reported) |
 
 ## Failure behavior
@@ -95,6 +112,7 @@ when the leader dies, and fence the old leader with an epoch so the pair never s
 | Persist unavailable at promotion | — | Error `Replica: epoch persist failed`; promotes on the in-memory epoch |
 | Replica lag | stream is async: a read on the replica right after a leader write may miss | — |
 | Stale leader | — | Warn `Replica: stale leader frame`, connection dropped |
+| Peer without / with a wrong cluster token | `/replica` → 401; `/health` → `{"status":"ok"}` only | Warn `Replica: peer refused` (remote, reason); the follower retries with backoff |
 
 ## Reuse
 
@@ -104,7 +122,8 @@ frame types; `ws.Handler.KickAll` (through `Options.KickClients`).
 
 ## Decisions
 
-D-010 (paths), D-012 (epoch fencing), D-013 (registry-owned sheets, hashes replicated), D-014 (queues).
+D-010 (paths), D-012 (epoch fencing), D-013 (registry-owned sheets, hashes replicated), D-014 (queues),
+D-031 (cluster token), D-027/D-028/D-030 (control frames).
 ASSUMPTIONS: "Wire: replica stream", "Replica: locks", "Replica: client opens", "Replica: fencing peer".
 
 ## Wire compatibility
@@ -130,3 +149,5 @@ a pair: only a promotion raises the epoch).
 | 6 (persist) | `testing/integration/persist_test.go` TestPersistEpochAcrossPromotion | integration (DB) |
 | 9, 10 | NO TEST: `internal/replica/follower.go` stale-frame drop (needs a fake leader); shutdown covered by every test's Stop under -race | — |
 | 11 | `testing/integration/control_test.go` TestAdvisoryElection | integration (DB, skips) |
+| 12 | `testing/integration/peerauth_test.go` TestPeerAuthReplica, TestPeerAuthHealth, TestPeerAuthFencing; `internal/replica/follower_test.go` TestClusterTokenRefusalAndProbeHeader | integration + unit |
+| 13 | `internal/replica/follower_test.go` TestFollowerControlFrames (decode, epoch check, OnControl); the end-to-end replica apply is B's `testing/integration/suspend_test.go` | unit |

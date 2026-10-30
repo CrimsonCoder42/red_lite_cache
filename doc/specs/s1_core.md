@@ -31,7 +31,7 @@ and fans one encoded frame out to every collaborator, for backendAdvo's cache.
 13. K14/D-013: autocreate off → `ErrSheetNotFound`; on → `created=true`, Warn `Sheet: autocreated`, OpCreate
     with `DefaultProject` observed before any op on that sheet; concurrent opens create exactly one sheet.
 14. Wrong password → `ErrBadPassword`; empty name/password → `ErrNameRequired`; full sheet → `ErrSheetFull`.
-15. `RunJanitor` skips passes while `active()` is false and returns nil on `ctx.Done`.
+15. `RunJanitor` expires no key while `active()` is false (it only prunes sweep logs by age, D-042 / leaks 2026-10-29) and returns nil on `ctx.Done`.
 
 ## Surface
 
@@ -66,7 +66,7 @@ and fans one encoded frame out to every collaborator, for backendAdvo's cache.
 | Unknown sheet, autocreate off | `ErrSheetNotFound` | nothing created |
 | Stale read-through set | `ErrStaleWrite` in the reply | nothing applied, seq unchanged |
 | Sheet full | `ErrSheetFull` | nothing applied; overwrites still allowed |
-| Replica (inactive) | — | janitor skips; leader's `replicate_expire` arrives via `ApplyReplicated` |
+| Replica (inactive) | — | janitor expires nothing and prunes sweep logs; leader's `replicate_expire` arrives via `ApplyReplicated` |
 | Persist unavailable | — | not this slice; observers enqueue and return |
 
 ## Reuse

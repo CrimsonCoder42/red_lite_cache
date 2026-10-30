@@ -20,7 +20,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *sheet.Registry) {
 	t.Helper()
 	reg := sheet.NewRegistry(sheet.Options{BcryptCost: 4, Autocreate: false})
 	mux := http.NewServeMux()
-	New(reg, NewMemStore(), admin, nil).Register(mux)
+	New(reg, NewMemStore(), admin, nil, Options{}).Register(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, reg
@@ -139,7 +139,7 @@ func TestAuthAndValidation(t *testing.T) {
 func TestEmptyAdminKeyRefusesEverything(t *testing.T) {
 	reg := sheet.NewRegistry(sheet.Options{BcryptCost: 4, Policy: cache.Policy{}})
 	mux := http.NewServeMux()
-	New(reg, NewMemStore(), "", nil).Register(mux)
+	New(reg, NewMemStore(), "", nil, Options{}).Register(mux)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	for _, key := range []string{"", " ", "x"} {
@@ -165,7 +165,7 @@ func TestKeyAtRestIsHashed(t *testing.T) {
 func TestReplicaRefusesAdminWrites(t *testing.T) {
 	reg := sheet.NewRegistry(sheet.Options{BcryptCost: 4})
 	mux := http.NewServeMux()
-	New(reg, NewMemStore(), admin, func() bool { return false }).Register(mux)
+	New(reg, NewMemStore(), admin, func() bool { return false }, Options{}).Register(mux)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	if got := call(t, srv, "POST", "/admin/projects", admin, protocol.CreateProjectRequest{Name: "x"}, nil); got != http.StatusServiceUnavailable {

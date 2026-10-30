@@ -78,13 +78,14 @@ func Listen(t testing.TB) net.Listener {
 	return ln
 }
 
-// StartReplica starts a replica of leader from TestConfig (instance id <test>-replica) with mods
-// applied, and waits until it has applied the leader's snapshot.
+// StartReplica starts a replica of leader from TestConfig (instance id <test>-replica, the leader's
+// cluster token — D-031) with mods applied, and waits until it has applied the leader's snapshot.
 func StartReplica(t testing.TB, leader *Server, mods ...func(*config.Config)) *Server {
 	t.Helper()
 	cfg := TestConfig(t)
 	cfg.Role = "replica"
 	cfg.LeaderAddr = leader.ReplicaURL
+	cfg.ClusterToken = leader.Cfg.ClusterToken
 	cfg.InstanceID += "-replica"
 	for _, m := range mods {
 		m(&cfg)
@@ -94,21 +95,31 @@ func StartReplica(t testing.TB, leader *Server, mods ...func(*config.Config)) *S
 	return srv
 }
 
-// Health GETs srv's /health.
+// Health GETs srv's /health with srv's cluster token, so role and epoch are present (D-031).
 func Health(t testing.TB, srv *Server) protocol.Health {
 	t.Helper()
-	h, err := TryHealth(srv.URL)
+	h, err := TryHealthToken(srv.URL, srv.Cfg.ClusterToken)
 	if err != nil {
 		t.Fatalf("health %s: %v", srv.URL, err)
 	}
 	return h
 }
 
-// TryHealth GETs baseURL/health and decodes it.
-func TryHealth(baseURL string) (protocol.Health, error) {
+// TryHealth GETs baseURL/health without a cluster token and decodes it.
+func TryHealth(baseURL string) (protocol.Health, error) { return TryHealthToken(baseURL, "") }
+
+// TryHealthToken GETs baseURL/health, with `Authorization: Bearer <token>` when token is set.
+func TryHealthToken(baseURL, token string) (protocol.Health, error) {
 	var h protocol.Health
 	c := &http.Client{Timeout: 2 * time.Second}
-	resp, err := c.Get(baseURL + protocol.PathHealth)
+	req, err := http.NewRequest(http.MethodGet, baseURL+protocol.PathHealth, nil)
+	if err != nil {
+		return h, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return h, err
 	}

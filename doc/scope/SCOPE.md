@@ -36,11 +36,11 @@ shape from. Status is this repo's status.
 
 | # | advo_cache defect | Where | Fix (D-id) | Test (fails on advo_cache, passes here) |
 |---|---|---|---|---|
-| K1 | Reader's local map has no TTL and no eviction | `reader/reader.go` | D-008 | `reader` `TestR4ExpiryAndBound`; integration `TestKeyLoop` |
+| K1 | Reader's local map has no TTL and no eviction | `reader/reader.go` | D-008 | `reader` `TestR4ExpiryAndBound`; integration `TestKeyLoop`; leaks `TestL3ReaderBoundHoldsUnderChurn`, `TestL2ReaderEntriesFreedByExpire` |
 | K2 | Deletes dropped while the socket is disconnected | `reader/reader.go` | D-005 | integration `TestDisconnectLoop`; `reader` `TestR2DeletesQueuedAndReplayed`, `TestR2QueueOverflowCollapses` |
 | K3 | Server-side TTL expiry is not broadcast | `cache/cache.go` | D-003/D-009 | integration `TestKeyLoop` (invalidate{keys}); `internal/sheet` `TestRunJanitor` |
 | K4 | Reader gives up after `MaxReconnectAttempts` | `reader/reader.go` | D-004 | integration `TestReconnectForever`; `reader` `TestR1ReconnectForever` |
-| K5 | One goroutine per cached entry for expiry | `cache/cache.go:44-51` | D-003 | `internal/cache` `TestResetExtendsLife`, `TestLazyExpiry` |
+| K5 | One goroutine per cached entry for expiry | `cache/cache.go:44-51` | D-003 | `internal/cache` `TestResetExtendsLife`, `TestLazyExpiry`; leaks `TestL1StoreExpireFreesEntriesAndIndex`, `TestL2JanitorBroadcastsAndFrees` |
 | K6 | Full-state sync is one monolithic frame | `ws/handler.go` | snapshot_sheet per sheet | integration `TestSnapshotThenStream` |
 | K7 | Replica message types duplicated between server and reader | `replica/replica.go`, `reader/reader.go` | `protocol/` package | `protocol` `TestV1CompatibilityFieldNames` (one definition; the hook rejects untyped messages) |
 | K8 | 150-line how-to printed to stdout on every boot | `main.go:95-260` | `logger.Banner`, `doc/protocol/wire.md` | binary run in bootstrap report (one `Config: redlite starting` line) — NO TEST |
@@ -66,7 +66,8 @@ Full analysis with the pattern comparison: `doc/assessment_2026-10-29.md`.
 | S4 | `internal/replica` (heartbeat, snapshot+stream, **fenced** promotion, credentials replicated) | `specs/s4_replica.md` | **built 2026-10-29** (bootstrap) | S2, D-012 |
 | S5 | `internal/persist` + `db/migration` (write-behind, hydration, cleaner; sheet lifecycle decoupled from connections) | `specs/s5_persist.md` | **built 2026-10-29**; DB tests SKIPPED (no `REDLITE_TEST_DATABASE_URL`) — not verified against Postgres | S1, D-013 |
 | S6 | `internal/api` — the registry: create sheet/project, issue API keys, export. **Required for multi-project** (K14) | `specs/s6_api.md` | **built 2026-10-29** (bootstrap; import and key revocation in TODO) | S5 |
-| S7 | `backendAdvo` migration: swap `advo_cache/reader` for this reader | (in advomedix-v2) | not started | S3, tag v0.1.0 |
+| S7 | `backendAdvo` migration: swap `advo_cache/reader` for this reader | `specs/s7_migration.md`, `doc/consumer/backendadvo_migration.md` | **planned 2026-10-29** — evidence built: `testing/conformance` C1–C13 green in both admission modes, `reader/v1compat` (cut-over step 1); the backendAdvo edits are Devin's | S3, tag v0.3.0 |
+| S8 | Tenancy: registration, admission (`api_key`), sessions, suspend/kick/revoke, per-key revoke/rotate, peer auth (`.claude/prompts/tenancy.md`, D-024…D-031) | `specs/s6_api.md`, `doc/tenancy_2026-10-29/` | **built 2026-10-29**; DB paths (NOTIFY, audit rows) SKIPPED without `REDLITE_TEST_DATABASE_URL` | S6, migration 000002 |
 
 Order: S1 → S2 → S3 → (S4 ∥ S5) → S6 → S7. A thin tracer bullet (open a sheet, set, get from a
 second reader) ships at the end of S3 and is the first tag.

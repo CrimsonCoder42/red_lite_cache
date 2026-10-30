@@ -28,7 +28,10 @@ type Options struct {
 	Role       string // RoleLeader | RoleReplica at boot (REDLITE_ROLE)
 	LeaderAddr string // replica: the leader, ws://host:port[/replica] (REDLITE_LEADER_ADDRESS)
 	PeerAddr   string // the other node, ws://host:port (REDLITE_PEER_ADDRESS); "" = no probe
-	InstanceID string
+	// ClusterToken is REDLITE_CLUSTER_TOKEN (D-031): required as a Bearer token on /replica and the
+	// peer /health probe, and sent by this node when it dials or probes. "" = no peer auth (dev only).
+	ClusterToken string
+	InstanceID   string
 
 	HeartbeatInterval time.Duration // REDLITE_HEARTBEAT_INTERVAL: leader → replica heartbeat, peer probe
 	HeartbeatTimeout  time.Duration // REDLITE_HEARTBEAT_TIMEOUT: replica promotes after this long without a frame
@@ -45,6 +48,10 @@ type Options struct {
 	// OnPromote runs after this node became leader by promotion, before it serves as leader.
 	// synced is false when no leader snapshot ever reached this node since boot.
 	OnPromote func(ctx context.Context, synced bool)
+	// OnControl is called on a replica for each tenancy control frame from the leader
+	// (project_suspended, project_resumed, key_revoked, session_kill — D-027/D-028/D-030), used when
+	// persistence is off and NOTIFY cannot carry them. Must not block. nil = ignored.
+	OnControl func(protocol.ReplicaControl)
 	// Elector is REDLITE_ELECTION=advisory (D-022; persist.Elector): nil = epoch mode (D-012) only.
 	// With it a node leads only while it holds the lock — a boot leader starts as a replica and
 	// promotes once it has the lock, a replica promotes on timeout only if it gets the lock, and a

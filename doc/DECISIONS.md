@@ -185,3 +185,97 @@ See D-003; recorded separately because SCOPE K3 cites it.
 **Chosen** Per key the reader keeps the earliest miss of every `MissWindow/2` time slice, each live for `reader.Config.MissWindow` (default 30 s = `REDLITE_SWEEP_LOG_WINDOW`; at most 3 records per key). A set sends `base_seq` = the oldest live record and never consumes it; with no live record it sends the current applied seq. (A single oldest-record rule was tried first and failed the stress test 3/5: a miss just before the record expired went unrecorded. With slices, any read-through faster than `MissWindow/2` sends a base at or before its own miss.)
 **Alternatives + why lost** A miss ticket passed back to the set (additive API) — every read-through call site in the consumer changes, which the CONTRACTS forbid before S7. Per-key outstanding-miss counts — a miss never followed by a set pins the key forever.
 **Consequences** After a covering write, read-throughs of that key are refused (`ErrStale`, not cached) for up to 30 s. Never stale; at worst one DB read per request for that key during the window.
+
+## D-024 Admission: optional api_key on open, policy by REDLITE_ADMISSION (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** `open` gains `api_key` (additive, omitempty). `REDLITE_ADMISSION=password` (v1: sheet password only — the advomedix cut-over) or `key` (api_key required, must belong to the sheet's project, password still checked). Default `key` when `REDLITE_ENVIRONMENT=production`, else `password`. Every admission refusal is `{"success":false,"error":"not authorized"}` — never "wrong password" vs "wrong key" (no oracle). Code: `internal/tenant` (Directory.Admit), `internal/ws` open.
+**Alternatives + why lost** Key-only everywhere — breaks the v1 reader backendAdvo runs today; a separate auth handshake frame — a second round trip and a new state in every client.
+
+## D-025 Autocreate is development-only (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** `REDLITE_SHEET_AUTOCREATE` defaults true only when `REDLITE_ENVIRONMENT=development`, and is forced off in any other environment even when set (`internal/config`). Autocreate never recreates a name a revoke dropped (`tenant.Directory.Revoked`); a suspended project's sheets still exist, so autocreate never applies to them.
+**Alternatives + why lost** Keep the v1 default (on) — any client that reaches the port creates a tenant (K14).
+
+## D-026 Sessions: in-memory per node, audited (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** `internal/session.Registry` per node (map + RWMutex, session id = uuid), one entry per authenticated connection; last_seen and frame counters are atomics touched per inbound frame (no lock). No table for live sessions; open/close/kick rows go to `audit_events` (000002). GET /admin/sessions returns this node's sessions plus the peer's (fetched from the peer's /admin/sessions with the same admin key), each tagged `node`.
+**Alternatives + why lost** A `sessions` table — per-node state that dies with the process would need cleanup on every crash; a write per open on the hot path.
+
+## D-027 Suspend: reversible, data kept (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** `projects.suspended_at` (000002). POST /admin/projects/{id}/suspend and /resume. Suspend closes every session of the project on every node (close 4001 `suspended`) and refuses `open`; sheets and entries stay in memory and Postgres and keep flushing. Propagated by NOTIFY `redlite_control` with persistence, else leader → replica as a `project_suspended`/`project_resumed` control frame.
+**Alternatives + why lost** Only revoke — destroys data for what is often a billing or abuse pause.
+
+## D-028 Keys: many per project, revoke one, rotate (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** POST /admin/projects/{id}/keys (issue another, optional label), DELETE /admin/keys/{id} (revoke one; sessions admitted with it close 4002 `key revoked`), POST /admin/keys/{id}/rotate (issue + revoke in one tx, new key returned once). `api_keys.last_used_at` touched at most once a minute per key.
+**Alternatives + why lost** One key per project — one leaked key takes the whole project down to rotate.
+
+## D-029 Listing: read-only, admin-only, keyset paged (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** GET /admin/projects, /admin/projects/{id}, /admin/sheets/{name}/sessions, /admin/sessions. `limit` (default 50, max 200) + opaque `cursor` (keyset on created_at,id), shapes in `protocol/admin.go`.
+**Alternatives + why lost** Offset paging — skips/duplicates rows under concurrent inserts.
+
+## D-030 Kick and terminal close codes (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** DELETE /admin/sessions/{id} closes one connection with 4003 `kicked by admin`. The reader treats 4001/4002/4003 as terminal: no reconnect, Close() state, and `LastError()` reports ErrSuspended / ErrAdmitted (key revoked) / ErrKicked. 1000/1001/1006 and network errors keep reconnect-forever (R1).
+**Alternatives + why lost** Kick with 1008 — the reader reconnects at once and the kick does nothing.
+
+## D-031 Peer auth: REDLITE_CLUSTER_TOKEN (2026-10-29, accepted — Devin, tenancy.md)
+
+**Chosen** /replica and the peer /health probe require `Authorization: Bearer <REDLITE_CLUSTER_TOKEN>` (constant-time compare). Missing or wrong → 401 before upgrade, nothing logged beyond remote addr and reason, no snapshot. Empty token in production refuses to start (config error); empty in development logs one Warn. Readers never use it. The admin key is unchanged; rotating it is an env change and a restart (`doc/release.md`).
+**Alternatives + why lost** mTLS — certificate distribution for a two-node pair already on Tailscale; reuse the admin key — one leaked secret would open both the API and the replication stream.
+
+## D-032 Consumer conformance: a miniature of backendAdvo's cache layer (2026-10-29, accepted — Devin, conformance request)
+
+**Chosen** `testing/conformance/` (line 1 of every file `// Covers: backendAdvo cache layer`): `consumerstore.go` mirrors `cachedOne`/`cachedList` (`backendAdvo/cache/shared.go:109-157`), `invalidateDomain` WITHOUT the second sweep (`store.go:269-275`), `invalidateDomainBoth` (`store.go:293-298`), `domainPatientPrefix`/`domainCursorKey`/`domainFeedWindowKey` (`keys.go:60,100,127`) and five TTL constants, over the public reader API only; `FakeDB` counts loads.
+**Alternatives + why lost** Run backendAdvo's own harness against red_lite_cache — it needs advomedix's database and its full app; a miniature isolates the cache contract and runs under `-race` here.
+
+## D-033 Key corpus read from keys.go (2026-10-29, accepted)
+
+**Chosen** `testing/conformance/keycorpus.go`: every distinct key SHAPE (≥40, one sample each, citing the keys.go builder lines), feeding the sweep tests and the R7 benchmark.
+**Alternatives + why lost** Synthetic keys — the bootstrap's 50-equal-roots benchmark was a best case (audit finding R7).
+
+## D-034 Three readers = three instances, both admission modes (2026-10-29, accepted)
+
+**Chosen** Every conformance test runs 3 readers on one sheet (backendAdvo's three API instances share one sheet), in `REDLITE_ADMISSION=password` + autocreate (cut-over) and again in key mode with a registered project (target).
+
+## D-035 reader/v1compat: the exact advo_cache reader surface (2026-10-29, accepted)
+
+**Chosen** A new public package over `reader.Reader` with advo_cache's surface (`advo_cache/reader/reader.go`): `New(Config{LeaderAddr, BackupAddr, Sheet, Password, MaxReconnectAttempts (ignored), ReconnectDelay})`, `Get(key) (any, bool)` (a fresh decode per call), `GetString`, `GetMap`, `Has`, `IsNull`, `Set`, `SetWithTTL`, `Delete*`, `Close`, `IsConnected`, `CurrentServer`, `CacheSize`, and its three errors. Cut-over step 1 is an import-path change only.
+**Alternatives + why lost** Change backendAdvo's call sites in one step — 464 read-throughs and the workaround deletions in one diff, no clean rollback.
+
+## D-036 Migration plan from test evidence (2026-10-29, accepted)
+
+**Chosen** `doc/consumer/backendadvo_migration.md`: each backendAdvo workaround mapped to the conformance test that retires it (or "still needed"), then the ordered cut-over (v1compat import swap → delete workarounds one at a time → `Get(key,&T)` direct), env mapping and a rollback per step.
+
+## D-037 R7 index: decided by benchmark on real key shapes (2026-10-29, accepted — outcome recorded below when B1 runs)
+
+**Chosen** Implement a two-segment index (`<root>:patient:<uuid>` head) in `internal/cache`; keep it only if benchstat (count=6) on corpus-shaped keys shows it wins, else remove it and record the numbers.
+**Outcome — KEPT** (`internal/cache/store.go`; B1, count=6, `doc/conformance_2026-10-29/bench_b1.txt`; benchstat not on PATH, mean ± half-range by hand). 10 000 keys, 50 profiles × 8 roots, 25 keys per head: profile sweep 30 361 ns ±41% → **10 600 ns ±17% (0.35×)**; sweep of an absent profile 15 092 → **482 ns (0.032×)**; cost: a new key's set+delete 333 → 433 ns (1.30×). The sweep is the consumer's correctness path on every write; the extra ~100 ns is paid once per new key. `cache.NewWithoutHeadIndex()` stays exported as the comparison hook.
+**On REAL shapes** (10 526 `keycorpus.go` keys, 8 roots × 50 profiles, swept root `med`; count=6, tight spreads — an earlier lead run with 9–35 µs spreads was throttled and is superseded; the checker reproduced these): profile sweep 18 626 → **8 276 ns (0.44×)**; sweep of a profile with nothing cached in that root (every `invalidateDomainBoth` requester, every write to a domain nobody read) 11 018 → **435 ns (0.039×)**; **cost: a new key's set+delete 320 → 457 ns (1.43×)**. Kept: the sweep runs on every write and is the correctness path; the cost is paid once per new key.
+
+## D-038 Leak suite: testing/leaks, five named steps (2026-10-29, accepted — Devin, leaks request)
+
+**Chosen** `testing/leaks/` (line 1 of every file `// Covers: memory and goroutine bounds`): one file per layer (`store_test.go`, `conn_test.go`, `reader_test.go`) + `e2e_test.go`, helpers in `leaks.go`. Every test logs BASELINE (after the harness is up, two settle passes) → FILL → OBSERVE (peak must exceed baseline, `leaks.Above`) → DRAIN (the real event: expire, delete, close, kick, revoke) → ASSERT (baseline ± a tolerance stated with its reason). Goroutines: `runtime.NumGoroutine` with a settle loop (20 × 10 ms, two equal samples); memory: `HeapAlloc` after two `runtime.GC` (never `Sys`).
+**Alternatives + why lost** `go.uber.org/goleak` — a new module (dependency checkpoint not cleared) and it checks only goroutines, not maps, buckets or queues; heap-profile diffs — not assertable in a test.
+
+## D-039 Clock: an injectable test seam, not a feature (2026-10-29, accepted)
+
+**Chosen** `config.Config.Clock func() time.Time` (never read from env; nil = `time.Now`) → `sheet.Options.Now` (already existed) and `lock.NewManager(now)`; `cache.Store` needs none (every time-dependent call takes `now`). The reader gets an unexported clock field only: exporting it through `reader.Config` would be new public surface, and L2–L4 need none (expiry reaches readers as `invalidate{keys}`). Harness: `integration.NewClock`, `WithClock`. The janitor and lock cleaner keep ticking on real time; they compare against the clock.
+**Alternatives + why lost** Very short real TTLs everywhere — sleeps, flaky under `-race`; a global clock variable — shared mutable state across parallel tests.
+
+## D-040 Measurable sizes: Stats() counts only (2026-10-29, accepted)
+
+**Chosen** `Stats()` returning counts (never keys or values) on `cache.Store`, `sheet.Registry`, `reader.Reader` (exported `reader.Stats`, diagnostic, not part of the compatibility contract), `lock.Manager`, `tenant.Directory`, `persist.Writer`, `ws`; `/health` carries them under `"stats"` only when `REDLITE_ENVIRONMENT=development` (additive, omitted otherwise). The leak tests assert on these.
+**Alternatives + why lost** Reflection / unsafe size probes from tests — breaks on every refactor and reads unexported state; expvar — a global registry, and exposed in production.
+
+## D-041 Bound the tenant sets (2026-10-29, accepted)
+
+**Chosen** Revoked sheet names and revoked key ids in `tenant.Directory` are capped at `REDLITE_TENANT_MEMORY_MAX` (default 10 000 each), oldest dropped, one Warn on the first drop, counted in Stats; and cleared when the tenancy state is reloaded from Postgres (persist on), because Postgres is then the truth.
+**Alternatives + why lost** Leave them unbounded — every revoke since boot stays in memory forever; a TTL per entry — a second expiry loop for two sets that are rarely written.
+
+## D-042 Sheets are never evicted from memory (2026-10-29, accepted — D-013 stands)
+
+**Chosen** The leak tests assert the sheet count equals the sheets the test created; an emptied sheet (0 collaborators, 0 entries) costs only its struct: its Stats are 0/0 with no stale index buckets or sweep-log entries kept beyond their bound.
+**Alternatives + why lost** Evict idle sheets — a sheet is a tenant's registration (D-013, K13), not a cache entry; evicting it would make the next open fail or autocreate.

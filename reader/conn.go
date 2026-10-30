@@ -23,6 +23,33 @@ var errLinkLost = errors.New("reader: connection lost")
 // errStaleEpoch: the server's open reply carried a lower epoch than one already seen (D-012).
 var errStaleEpoch = errors.New("reader: stale epoch")
 
+// serverClose is a terminal close (D-030): the server ended the session with code and the reader
+// must not reconnect. It unwraps to ErrSuspended, ErrAdmitted or ErrKicked.
+type serverClose struct {
+	code     int
+	sentinel error
+}
+
+func (e *serverClose) Error() string { return fmt.Sprintf("%v (close %d)", e.sentinel, e.code) }
+func (e *serverClose) Unwrap() error { return e.sentinel }
+
+// terminalClose maps a read error carrying close code 4001/4002/4003 to its serverClose; any other
+// error (1000, 1001, 1006, network) is nil — those keep reconnect-forever (R1).
+func terminalClose(err error) *serverClose {
+	if err == nil {
+		return nil
+	}
+	switch code := websocket.CloseStatus(err); code {
+	case protocol.CloseSuspended:
+		return &serverClose{code: int(code), sentinel: ErrSuspended}
+	case protocol.CloseKeyRevoked:
+		return &serverClose{code: int(code), sentinel: ErrAdmitted}
+	case protocol.CloseKicked:
+		return &serverClose{code: int(code), sentinel: ErrKicked}
+	}
+	return nil
+}
+
 type opKind uint8
 
 const (
@@ -119,8 +146,12 @@ func (m chanMutex) unlock() { <-m }
 //
 // after advo_cache/reader/reader.go:530-584: 3 tries per server then give up → forever, alternating
 // LeaderAddr/BackupAddr, backoff ReconnectMin doubling to ReconnectMax with full jitter, reset after
-// a connection that lasted (R1, D-004).
+// a connection that lasted (R1, D-004). A terminal close (4001/4002/4003, D-030) ends it for good:
+// LastError is set, the reader closes itself, and New (if still waiting) returns the sentinel.
 func (r *Reader) run() {
+	// Every exit of run is the reader's end (Close, Config.Context, terminal close), and connect
+	// returns only after its read loop exited: nothing applies a frame or requeues a delete after this.
+	defer r.release()
 	var addrs []string
 	for _, a := range []string{r.cfg.LeaderAddr, r.cfg.BackupAddr} {
 		if a != "" {
@@ -134,6 +165,10 @@ func (r *Reader) run() {
 		start := time.Now()
 		connected, err := r.connect(addrs[idx], sessions > 0)
 		if r.ctx.Err() != nil {
+			return
+		}
+		if sc, ok := errors.AsType[*serverClose](err); ok {
+			r.closeByServer(addrs[idx], sc)
 			return
 		}
 		if connected {
@@ -170,8 +205,21 @@ func (r *Reader) run() {
 	}
 }
 
+// closeByServer is the terminal path (D-030), run by run itself: record the sentinel, close the
+// reader (writes return ErrClosed from now on) and release New. Close stays idempotent: the
+// caller's Close later only waits for the goroutines.
+func (r *Reader) closeByServer(addr string, sc *serverClose) {
+	err := sc.sentinel
+	r.lastErr.Store(&err)
+	r.closed.Store(true)
+	r.log.Warn("Reader: closed by server", "addr", addr, "code", sc.code, "err", err)
+	r.signalFirst(err)
+	r.cancel()
+}
+
 // connect runs one connection to addr from dial to teardown. It reports whether the reader reached
-// connected on it.
+// connected on it. A terminal close of the session (during the handshake, the replay or after it)
+// is returned as a *serverClose.
 //
 // after advo_cache/reader/reader.go:376-441: open, wait for success, wait for sheet_state, mark
 // connected → also: version + epoch on open, epoch check on the reply, queued deletes replayed and
@@ -201,6 +249,9 @@ func (r *Reader) connect(addr string, reconnect bool) (bool, error) {
 	}
 	<-done
 	_ = sess.conn.CloseNow()
+	if sc := terminalClose(sess.readErr); sc != nil {
+		return connected, sc
+	}
 	if r.ctx.Err() == nil {
 		cause := sess.readErr
 		if err != nil {
@@ -231,7 +282,7 @@ func (r *Reader) handshake(addr string) (*session, error) {
 	seen := r.epoch.Load()
 	open, err := json.Marshal(protocol.Request{
 		Action: protocol.ActionOpen, ID: r.nextID.Add(1), Version: protocol.Version, Epoch: seen,
-		Sheet: r.cfg.Sheet, Password: r.cfg.Password,
+		Sheet: r.cfg.Sheet, Password: r.cfg.Password, APIKey: r.cfg.APIKey,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("reader: encode open: %w", err))
@@ -244,6 +295,9 @@ func (r *Reader) handshake(addr string) (*session, error) {
 	var reply protocol.Response
 	for {
 		data, env, err := readFrame(hctx, conn)
+		if sc := terminalClose(err); sc != nil {
+			return fail(sc)
+		}
 		if err != nil {
 			return fail(fmt.Errorf("reader: open %s: %w", addr, err))
 		}
@@ -256,8 +310,14 @@ func (r *Reader) handshake(addr string) (*session, error) {
 		break
 	}
 	if !reply.Success {
-		if reply.Error == protocol.ErrMsgInvalidPassword {
+		switch reply.Error {
+		case protocol.ErrMsgInvalidPassword, protocol.ErrMsgNotAuthorized:
+			// Not terminal: New fails with ErrAuthFailed; a later reconnect keeps retrying (an
+			// operator may fix the key or the password while the consumer runs).
 			return fail(fmt.Errorf("reader: open %s: %w", addr, ErrAuthFailed))
+		case protocol.ErrMsgSuspended:
+			// The server follows this reply with close 4001 (D-027): terminal either way.
+			return fail(&serverClose{code: protocol.CloseSuspended, sentinel: ErrSuspended})
 		}
 		return fail(fmt.Errorf("reader: open %s: server: %s", addr, reply.Error))
 	}
@@ -273,6 +333,9 @@ func (r *Reader) handshake(addr string) (*session, error) {
 
 	for {
 		data, env, err := readFrame(hctx, conn)
+		if sc := terminalClose(err); sc != nil {
+			return fail(sc)
+		}
 		if err != nil {
 			return fail(fmt.Errorf("reader: open %s: await sheet_state: %w", addr, err))
 		}
@@ -283,7 +346,7 @@ func (r *Reader) handshake(addr string) (*session, error) {
 		if err := json.Unmarshal(data, &st); err != nil {
 			return fail(fmt.Errorf("reader: open %s: decode sheet_state: %w", addr, err))
 		}
-		r.local.replace(st, time.Now())
+		r.local.replace(st, r.now())
 		break
 	}
 
@@ -439,8 +502,12 @@ func (r *Reader) await(ctx context.Context, c *call) (protocol.Response, error) 
 }
 
 // enqueueLocked appends a delete to the replay queue; the caller holds cmu. Over MaxPendingDeletes
-// the queue collapses to one delete_prefix "" (D-005); once collapsed nothing more is needed.
+// the queue collapses to one delete_prefix "" (D-005); once collapsed nothing more is needed. A
+// delete racing Close is dropped: a closed reader never replays, so it would only linger.
 func (r *Reader) enqueueLocked(o op) (overflow bool) {
+	if r.isClosed() {
+		return false
+	}
 	if len(r.queue) == 1 && r.queue[0].kind == opDeletePrefix && r.queue[0].arg == "" {
 		return false
 	}
@@ -490,7 +557,7 @@ func (r *Reader) readLoop(sess *session) {
 // after advo_cache/reader/reader.go:484-524: switch on type, replies ignored → replies matched to
 // their request by id and applied in read order; expires_in_ms and seq honoured.
 func (r *Reader) dispatch(sess *session, env protocol.Envelope, data []byte) bool {
-	now := time.Now()
+	now := r.now()
 	switch env.Type {
 	case "":
 		return r.reply(sess, env, data, now)

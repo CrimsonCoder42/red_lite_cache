@@ -41,7 +41,8 @@ type sweepLog struct {
 	max     int           // <= 0: no count bound
 }
 
-// prune drops entries older than window and, when room is needed for one more, beyond max.
+// prune drops entries older than window and, when room is needed for one more, beyond max. A prune
+// that empties the log sets entries to nil, so an idle sheet does not keep the backing array.
 func (l *sweepLog) prune(now time.Time, adding bool) {
 	drop := 0
 	if l.window > 0 {
@@ -63,6 +64,10 @@ func (l *sweepLog) prune(now time.Time, adding bool) {
 		return
 	}
 	l.floor = max(l.floor, l.entries[drop-1].seq)
+	if drop == len(l.entries) {
+		l.entries = nil
+		return
+	}
 	l.entries = l.entries[drop:]
 }
 

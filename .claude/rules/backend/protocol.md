@@ -38,8 +38,9 @@ current `backendAdvo` read. That list is the compatibility contract.
 
 ## The reader is a library
 
-- Exported surface is what a consumer calls: `New`, `Get`, `Set`, `Delete`, `DeletePrefix`,
-  `DeleteSuffix`, `Has`, `IsNull`, `Close`, `IsConnected`. Anything else is unexported.
+- Exported surface is what a consumer calls: `New`, `Get(key, &T)`, `GetRaw`, `Set`, `SetWithTTL`, `Delete`, `DeletePrefix`,
+  `DeleteSuffix`, `Has`, `IsNull`, `Close`, `IsConnected`, `LastError`; `Config.APIKey` for key-mode admission (D-024).
+  Anything else is unexported.
 - `reader.Config` is the only input; it takes a `context.Context` for lifetime and an optional
   `*slog.Logger`. No globals, no `init()`, no reading the environment.
 - Reconnect forever with capped backoff (`advomedix-v2/backendAdvo/CLAUDE.md` G-01-15). While

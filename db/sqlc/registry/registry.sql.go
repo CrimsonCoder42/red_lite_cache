@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (id, project_id, key_hash, key_prefix)
-VALUES ($1, $2, $3, $4)
+INSERT INTO api_keys (id, project_id, key_hash, key_prefix, label)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, project_id, key_prefix, created_at
 `
 
@@ -23,6 +24,7 @@ type CreateAPIKeyParams struct {
 	ProjectID uuid.UUID `json:"project_id"`
 	KeyHash   []byte    `json:"key_hash"`
 	KeyPrefix string    `json:"key_prefix"`
+	Label     string    `json:"label"`
 }
 
 type CreateAPIKeyRow struct {
@@ -39,6 +41,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		arg.ProjectID,
 		arg.KeyHash,
 		arg.KeyPrefix,
+		arg.Label,
 	)
 	var i CreateAPIKeyRow
 	err := row.Scan(
@@ -54,7 +57,7 @@ const createProject = `-- name: CreateProject :one
 
 INSERT INTO projects (id, name)
 VALUES ($1, $2)
-RETURNING id, name, created_at, quota_keys, quota_bytes
+RETURNING id, name, created_at, quota_keys, quota_bytes, suspended_at
 `
 
 type CreateProjectParams struct {
@@ -75,6 +78,7 @@ func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (P
 		&i.CreatedAt,
 		&i.QuotaKeys,
 		&i.QuotaBytes,
+		&i.SuspendedAt,
 	)
 	return i, err
 }
@@ -107,6 +111,37 @@ func (q *Queries) DeleteProjectSheets(ctx context.Context, projectID uuid.UUID) 
 	return items, nil
 }
 
+const getAPIKey = `-- name: GetAPIKey :one
+SELECT id, project_id, key_prefix, label, created_at, revoked_at, last_used_at
+FROM api_keys
+WHERE id = $1
+`
+
+type GetAPIKeyRow struct {
+	ID         uuid.UUID          `json:"id"`
+	ProjectID  uuid.UUID          `json:"project_id"`
+	KeyPrefix  string             `json:"key_prefix"`
+	Label      string             `json:"label"`
+	CreatedAt  time.Time          `json:"created_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) GetAPIKey(ctx context.Context, id uuid.UUID) (GetAPIKeyRow, error) {
+	row := q.db.QueryRow(ctx, getAPIKey, id)
+	var i GetAPIKeyRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.KeyPrefix,
+		&i.Label,
+		&i.CreatedAt,
+		&i.RevokedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const getActiveAPIKeyByHash = `-- name: GetActiveAPIKeyByHash :one
 SELECT id, project_id, key_prefix FROM api_keys
 WHERE key_hash = $1 AND revoked_at IS NULL
@@ -127,7 +162,7 @@ func (q *Queries) GetActiveAPIKeyByHash(ctx context.Context, keyHash []byte) (Ge
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, name, created_at, quota_keys, quota_bytes FROM projects
+SELECT id, name, created_at, quota_keys, quota_bytes, suspended_at FROM projects
 WHERE id = $1
 `
 
@@ -140,6 +175,7 @@ func (q *Queries) GetProject(ctx context.Context, id uuid.UUID) (Project, error)
 		&i.CreatedAt,
 		&i.QuotaKeys,
 		&i.QuotaBytes,
+		&i.SuspendedAt,
 	)
 	return i, err
 }
@@ -167,6 +203,50 @@ func (q *Queries) GetSheet(ctx context.Context, arg GetSheetParams) (Sheet, erro
 	return i, err
 }
 
+const listProjectKeys = `-- name: ListProjectKeys :many
+SELECT id, key_prefix, label, created_at, revoked_at, last_used_at
+FROM api_keys
+WHERE project_id = $1
+ORDER BY created_at, id
+`
+
+type ListProjectKeysRow struct {
+	ID         uuid.UUID          `json:"id"`
+	KeyPrefix  string             `json:"key_prefix"`
+	Label      string             `json:"label"`
+	CreatedAt  time.Time          `json:"created_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+}
+
+// GET /admin/projects/{id}: every key of the project (revoked included), never the hash.
+func (q *Queries) ListProjectKeys(ctx context.Context, projectID uuid.UUID) ([]ListProjectKeysRow, error) {
+	rows, err := q.db.Query(ctx, listProjectKeys, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProjectKeysRow{}
+	for rows.Next() {
+		var i ListProjectKeysRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.KeyPrefix,
+			&i.Label,
+			&i.CreatedAt,
+			&i.RevokedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProjectSheets = `-- name: ListProjectSheets :many
 SELECT project_id, name, password_hash, autocreated, created_at FROM sheets
 WHERE project_id = $1
@@ -188,6 +268,59 @@ func (q *Queries) ListProjectSheets(ctx context.Context, projectID uuid.UUID) ([
 			&i.PasswordHash,
 			&i.Autocreated,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectsPage = `-- name: ListProjectsPage :many
+SELECT p.id, p.name, p.created_at, p.suspended_at,
+       (SELECT count(*) FROM api_keys k WHERE k.project_id = p.id AND k.revoked_at IS NULL)::int AS keys,
+       (SELECT count(*) FROM sheets s WHERE s.project_id = p.id)::int AS sheets
+FROM projects p
+WHERE (p.created_at, p.id) > ($1::timestamptz, $2::uuid)
+ORDER BY p.created_at, p.id
+LIMIT $3
+`
+
+type ListProjectsPageParams struct {
+	AfterCreatedAt time.Time `json:"after_created_at"`
+	AfterID        uuid.UUID `json:"after_id"`
+	PageLimit      int32     `json:"page_limit"`
+}
+
+type ListProjectsPageRow struct {
+	ID          uuid.UUID          `json:"id"`
+	Name        string             `json:"name"`
+	CreatedAt   time.Time          `json:"created_at"`
+	SuspendedAt pgtype.Timestamptz `json:"suspended_at"`
+	Keys        int32              `json:"keys"`
+	Sheets      int32              `json:"sheets"`
+}
+
+// GET /admin/projects: keyset page on (created_at, id), with live key and sheet counts.
+func (q *Queries) ListProjectsPage(ctx context.Context, arg ListProjectsPageParams) ([]ListProjectsPageRow, error) {
+	rows, err := q.db.Query(ctx, listProjectsPage, arg.AfterCreatedAt, arg.AfterID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProjectsPageRow{}
+	for rows.Next() {
+		var i ListProjectsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.SuspendedAt,
+			&i.Keys,
+			&i.Sheets,
 		); err != nil {
 			return nil, err
 		}
@@ -231,6 +364,47 @@ func (q *Queries) ListSheets(ctx context.Context) ([]Sheet, error) {
 	return items, nil
 }
 
+const listSuspendedProjects = `-- name: ListSuspendedProjects :many
+SELECT id FROM projects
+WHERE suspended_at IS NOT NULL
+`
+
+// Boot and reconcile: the projects whose sessions must be refused.
+func (q *Queries) ListSuspendedProjects(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listSuspendedProjects)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAPIKey = `-- name: RevokeAPIKey :one
+UPDATE api_keys SET revoked_at = now()
+WHERE id = $1 AND revoked_at IS NULL
+RETURNING project_id
+`
+
+// DELETE /admin/keys/{id} and the old half of rotate: returns the project, or no row when the key
+// does not exist or was already revoked.
+func (q *Queries) RevokeAPIKey(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, revokeAPIKey, id)
+	var project_id uuid.UUID
+	err := row.Scan(&project_id)
+	return project_id, err
+}
+
 const revokeProjectKeys = `-- name: RevokeProjectKeys :execrows
 UPDATE api_keys SET revoked_at = now()
 WHERE project_id = $1 AND revoked_at IS NULL
@@ -243,6 +417,41 @@ func (q *Queries) RevokeProjectKeys(ctx context.Context, projectID uuid.UUID) (i
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setProjectSuspended = `-- name: SetProjectSuspended :one
+
+UPDATE projects
+SET suspended_at = CASE WHEN $1::boolean THEN COALESCE(suspended_at, now()) ELSE NULL END
+WHERE id = $2
+RETURNING suspended_at
+`
+
+type SetProjectSuspendedParams struct {
+	Suspended bool      `json:"suspended"`
+	ID        uuid.UUID `json:"id"`
+}
+
+// ================================
+// TENANCY (000002: D-027 suspend, D-028 keys, D-029 listing)
+// ================================
+// Suspends (suspended = true) or resumes a project; returns the stored suspended_at (NULL on resume).
+func (q *Queries) SetProjectSuspended(ctx context.Context, arg SetProjectSuspendedParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, setProjectSuspended, arg.Suspended, arg.ID)
+	var suspended_at pgtype.Timestamptz
+	err := row.Scan(&suspended_at)
+	return suspended_at, err
+}
+
+const touchAPIKeyUsed = `-- name: TouchAPIKeyUsed :exec
+UPDATE api_keys SET last_used_at = now()
+WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')
+`
+
+// Admission: at most one write a minute per key (D-028), never per frame.
+func (q *Queries) TouchAPIKeyUsed(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, touchAPIKeyUsed, id)
+	return err
 }
 
 const upsertSheet = `-- name: UpsertSheet :exec

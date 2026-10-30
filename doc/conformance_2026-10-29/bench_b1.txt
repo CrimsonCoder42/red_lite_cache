@@ -1,0 +1,136 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/CrimsonCoder42/red_lite_cache/testing/conformance
+cpu: Apple M1 Pro
+BenchmarkB1/sweep/index=segment-10         	   28950	     43971 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   30894	     39581 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   45218	     25296 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   62188	     18959 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   63901	     21684 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   38094	     32675 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=segment-10          	   82504	     14140 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   77298	     14832 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   81469	     14360 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   73957	     17221 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   77746	     14827 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   80896	     15170 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3588151	       393.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3269697	       368.6 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3780469	       317.6 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3982756	       319.4 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3963763	       299.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 4135426	       296.1 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/sweep/index=head-10            	  163137	     12327 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	   93020	     12210 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  145370	      8920 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  135134	      8728 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  134558	      9613 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  136894	     11804 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=head-10             	 2517153	       467.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2453174	       478.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2617696	       475.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2523025	       483.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2426488	       491.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2427024	       495.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=head-10            	 2747112	       431.5 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2870730	       425.6 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2765211	       427.8 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2869026	       467.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2876498	       414.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2817681	       431.3 ns/op	     256 B/op	       2 allocs/op
+PASS
+ok  	github.com/CrimsonCoder42/red_lite_cache/testing/conformance	131.512s
+
+# Summary (benchstat not on PATH: mean ± (max-min)/2/mean, median, n=6, computed by hand)
+sweep  segment   30361.0 ns ± 41% (median   28985.5) | head   10600.3 ns ± 17% (median   10708.5) | head/segment = 0.349x
+miss   segment   15091.7 ns ± 10% (median   14829.5) | head     482.1 ns ±  3% (median     481.0) | head/segment = 0.032x
+churn  segment     332.6 ns ± 15% (median     318.5) | head     433.2 ns ±  6% (median     429.6) | head/segment = 1.302x
+D-037 outcome: KEPT. sweep (25 of 10000 keys) and miss sweep win; churn (new key Set+Delete) costs the extra head-index maintenance.
+
+## Re-run on REAL key shapes (keycorpus.go, D-033) — lead, 2026-10-29
+# 10526 keys: the 8 profile roots with the most corpus shapes x 50 profiles, <=25 keys per head, + profile-independent records; sweep root "med".
+# benchstat not on PATH: mean / min / max of count=6 computed with awk.
+goos: darwin
+goarch: arm64
+cpu: Apple M1 Pro
+BenchmarkB1/sweep/index=segment-10         	   31756	     36007 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   44337	     25075 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   48079	     24464 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   42589	     26195 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   56286	     22376 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   52968	     24262 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=segment-10          	  102093	     11356 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  107565	     11692 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   95698	     13594 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  101964	     11990 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   77942	     16483 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	   85719	     13507 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3717957	       321.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3730245	       394.8 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 2254195	       610.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 1604242	       651.6 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 1780939	       667.1 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 2638196	       469.7 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/sweep/index=head-10            	   57315	     34710 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	   47919	     30866 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	   57936	     26209 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	   51771	     20135 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  125770	     13619 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  129248	      9099 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=head-10             	 2680982	       446.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2572392	       451.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2710183	       441.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2805618	       431.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2746063	       430.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2751105	       427.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=head-10            	 2796040	       434.2 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2762947	       435.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2729340	       441.0 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2658700	       448.7 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2794942	       430.0 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2864752	       440.6 ns/op	     256 B/op	       2 allocs/op
+# summary (ns/op): sweep segment 26396 (22376-36007) | head 22440 (9099-34710) = 0.85x, inside the noise
+#                  miss  segment 13104 (11356-16483) | head   438 (428-452)    = 0.033x
+#                  churn segment   519 (322-667)     | head   438 (430-449)    = noise
+
+## AUTHORITATIVE re-run on real shapes (lead, after the checker could not reproduce the run above; tight spreads)
+BenchmarkB1/sweep/index=segment-10         	   63636	     18537 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   66024	     18739 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   63644	     18579 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   63910	     18585 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   64298	     18965 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=segment-10         	   65611	     18354 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=segment-10          	  108560	     11042 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  108741	     11040 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  108550	     11086 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  110572	     10917 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  109022	     11040 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=segment-10          	  108568	     10986 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3694018	       319.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3738895	       324.3 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3857196	       313.2 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3482583	       328.7 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3883836	       319.5 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=segment-10         	 3766149	       317.2 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/sweep/index=head-10            	  123271	      8566 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  148263	      8158 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  139142	      8226 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  143020	      8443 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  151387	      8022 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/sweep/index=head-10            	  144772	      8244 ns/op	    1008 B/op	       6 allocs/op
+BenchmarkB1/miss/index=head-10             	 2682103	       444.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2719514	       432.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2795001	       432.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2750307	       437.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2817457	       423.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/miss/index=head-10             	 2811463	       440.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkB1/churn/index=head-10            	 2614288	       439.9 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2591204	       441.5 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2517288	       477.7 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2797524	       426.7 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2882434	       424.8 ns/op	     256 B/op	       2 allocs/op
+BenchmarkB1/churn/index=head-10            	 2576876	       533.9 ns/op	     256 B/op	       2 allocs/op
+# summary (ns/op, count=6, mean (min-max)): sweep segment 18626 (18354-18965) | head 8276 (8022-8566) = 0.44x
+#                                           miss  segment 11018 (10917-11086) | head  435 (423-444)   = 0.039x
+#                                           churn segment   320 (313-329)     | head  457 (425-534)   = 1.43x (the index's real cost)
+# The previous re-run (0.85x sweep, churn 'noise') had 9-35 us spreads — the machine was throttling; it is superseded. The checker's independent run: sweep 0.45x, churn 1.34x.

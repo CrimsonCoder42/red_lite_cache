@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/db"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/persist"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
 // Revoker is a Store that can revoke a project: every live key revoked and every sheet deleted,
@@ -28,9 +31,10 @@ func (m *MemStore) RevokeProject(_ context.Context, id uuid.UUID) ([]string, err
 	if _, ok := m.projects[id]; !ok {
 		return nil, ErrNotFound
 	}
-	for h, p := range m.keys {
-		if p == id {
-			delete(m.keys, h)
+	now := storeNow()
+	for _, k := range m.keys {
+		if k.ProjectID == id && k.RevokedAt.IsZero() {
+			k.RevokedAt = now
 		}
 	}
 	return nil, nil
@@ -101,6 +105,11 @@ func (s *Server) revokeProject(w http.ResponseWriter, r *http.Request) {
 	// Memory first, then the writer, then Postgres: once the sheets are out of the registry no new
 	// op of theirs can be accepted; the writer then discards what it holds and waits out a flush in
 	// flight; only after that are the rows deleted, so no queued or parked op re-inserts them.
+	// Terminal close first (4002: the project's keys are being revoked), so the readers stop instead
+	// of reconnecting into "not authorized"; the drop's ordinary kick after it is then a no-op
+	// (CloseWith: the first close wins). The other node gets the same through the control frame.
+	s.sessions.KillWhere(session.Filter{Project: project}, protocol.CloseKeyRevoked, protocol.CloseReasonKeyRevoked)
+	s.propagate(protocol.ReplicaControl{Type: protocol.TypeKeyRevoked, Project: project.String()})
 	dropped := DropProject(s.reg, project, nil)
 	s.revoked(project, dropped)
 	names, err := rv.RevokeProject(r.Context(), project)
@@ -117,6 +126,8 @@ func (s *Server) revokeProject(w http.ResponseWriter, r *http.Request) {
 		s.revoked(project, late)
 		dropped = append(dropped, late...)
 	}
+	s.tenants.MarkRevoked(dropped...) // autocreate never recreates them (D-025)
+	s.audit(project, "project_revoked", project.String(), map[string]string{"sheets_dropped": strconv.Itoa(len(dropped))})
 	logger.L.Info("API: project revoked", "project", project.String(), "sheets_dropped", len(dropped))
 	w.WriteHeader(http.StatusNoContent)
 }

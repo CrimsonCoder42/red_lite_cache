@@ -332,11 +332,14 @@ func (s *Sheet) ApplyReplicated(op Op) {
 	s.observe(op)
 }
 
-// expire is one janitor pass: remove expired keys, seq++, ONE invalidate{keys} to every collaborator
-// and one OpExpire to the observers (D-003, K3). Returns how many keys expired.
+// expire is one janitor pass: prune the sweep log by age (also when no key expires, so an idle
+// sheet's log empties once the window has passed — the same prune stale() runs first, so R6 is
+// unchanged), remove expired keys, seq++, ONE invalidate{keys} to every collaborator and one
+// OpExpire to the observers (D-003, K3). Returns how many keys expired.
 func (s *Sheet) expire(now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.log.prune(now, false)
 	keys := s.store.Expire(now)
 	if len(keys) == 0 {
 		return 0
@@ -352,6 +355,16 @@ func (s *Sheet) expire(now time.Time) int {
 	s.observe(op)
 	logger.L.Debug("Sheet: expired", "sheet", s.name, "keys", len(keys), "seq", op.Seq, "fanout", fanout)
 	return len(keys)
+}
+
+// pruneLog prunes the sweep log by age and count at now (no key is touched) and returns how many
+// entries it dropped.
+func (s *Sheet) pruneLog(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	before := len(s.log.entries)
+	s.log.prune(now, false)
+	return before - len(s.log.entries)
 }
 
 // kickAll kicks and drops every collaborator; returns how many.
@@ -377,6 +390,13 @@ func (s *Sheet) kickAllLocked(reason string) int {
 		delete(s.collabs, id)
 	}
 	return n
+}
+
+// stats returns the collaborator count, the sweep-log length and the store's counts, under mu.
+func (s *Sheet) stats() (collabs, logEntries int, st cache.Stats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.collabs), len(s.log.entries), s.store.Stats()
 }
 
 // Snapshot runs fn with the sheet's whole state under the sheet mutex, so a caller that enqueues the

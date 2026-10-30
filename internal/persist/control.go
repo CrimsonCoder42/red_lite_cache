@@ -20,12 +20,23 @@ const ControlChannel = "redlite_control"
 // KindProjectRevoked: every key of Project was revoked and its sheets deleted from Postgres.
 const KindProjectRevoked = "project_revoked"
 
+// Tenancy kinds (D-027, D-028, D-030): the same names as the leader → replica control frames
+// (protocol.Type*), so one apply serves both paths.
+const (
+	KindProjectSuspended = "project_suspended" // Project suspended: close its sessions 4001, refuse opens
+	KindProjectResumed   = "project_resumed"   // Project resumed
+	KindKeyRevoked       = "key_revoked"       // KeyID revoked (or rotated out): close its sessions 4002
+	KindSessionKill      = "session_kill"      // Session killed by an admin: close it 4003 if held here
+)
+
 // Control is one control-bus payload. A reference only (kind + id), never data: the receiver
 // re-reads or applies what the row change means (D-021). Not a WebSocket frame; it travels only
 // through Postgres between instances of this service.
 type Control struct {
 	Kind    string `json:"kind"`
 	Project string `json:"project,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
+	Session string `json:"session,omitempty"`
 }
 
 // Notify publishes c on ControlChannel (pg_notify, after the caller's commit).
@@ -109,7 +120,7 @@ func listenOnce(ctx context.Context, store *db.Store, apply func(Control), liste
 			logger.L.Warn("Persist: control payload ignored", "channel", n.Channel, "err", err)
 			continue
 		}
-		logger.L.Info("Persist: control received", "kind", c.Kind, "project", c.Project)
+		logger.L.Info("Persist: control received", "kind", c.Kind, "project", c.Project, "key_id", c.KeyID, "session", c.Session)
 		apply(c)
 	}
 }

@@ -24,6 +24,18 @@ var (
 	ErrStale = errors.New("reader: stale write")
 	// ErrTimeout: no acknowledgement within Config.WriteTimeout or the caller's context.
 	ErrTimeout = errors.New("reader: timeout")
+
+	// Terminal closes (D-030): the server closed the session with an application close code and
+	// the reader stopped for good — no reconnect, every write returns ErrClosed. LastError reports
+	// which one; New returns ErrSuspended when the first open is refused as suspended.
+	//
+	// ErrSuspended: the sheet's project is suspended (close 4001, or an open refused "suspended").
+	ErrSuspended = errors.New("reader: project suspended")
+	// ErrAdmitted: the admission was withdrawn — the API key this session was admitted with was
+	// revoked or rotated (close 4002).
+	ErrAdmitted = errors.New("reader: admission withdrawn (key revoked)")
+	// ErrKicked: an admin killed this session (close 4003).
+	ErrKicked = errors.New("reader: kicked by admin")
 )
 
 // Defaults for zero Config fields.
@@ -47,6 +59,10 @@ type Config struct {
 	BackupAddr string // optional: the replica, tried alternately with the leader
 	Sheet      string
 	Password   string
+	// APIKey is the project's API key, sent as api_key on every open (D-024). Required when the
+	// server runs REDLITE_ADMISSION=key; "" = not sent (password admission, the v1 open). Never
+	// logged.
+	APIKey string
 
 	Context context.Context // optional: the reader's lifetime; cancelling it is Close (nil = Background)
 	Logger  *slog.Logger    // optional (nil = slog.Default())
@@ -114,10 +130,15 @@ type Reader struct {
 	wg     sync.WaitGroup
 
 	local *local
+	// now is the reader's clock for every expiry and miss decision (D-039): local deadlines, lookups,
+	// miss records, base_seq. time.Now except in in-package tests (newReader). Unexported on purpose:
+	// a Config field would be new public surface. Reconnect backoff stays on real time.
+	now func() time.Time
 
 	closed    atomic.Bool
-	connected atomic.Bool   // written under cmu; read lock-free by Get/Has
-	epoch     atomic.Uint64 // highest leader epoch seen (D-012)
+	lastErr   atomic.Pointer[error] // the terminal close sentinel (D-030); set once, before closed
+	connected atomic.Bool           // written under cmu; read lock-free by Get/Has
+	epoch     atomic.Uint64         // highest leader epoch seen (D-012)
 	nextID    atomic.Uint64
 
 	cmu   sync.Mutex // guards sess, queue, every session's pending/dead, and connected transitions
@@ -130,11 +151,16 @@ type Reader struct {
 
 // New starts a reader and waits up to ConnectTimeout for the first connect. It returns the reader
 // even when the cache is down (still reconnecting, IsConnected false, reads miss) and fails only on
-// a refused password (ErrAuthFailed) or a config without an address or sheet.
+// a refused open — ErrAuthFailed (wrong password, or "not authorized": missing/foreign/revoked API
+// key), ErrSuspended (the project is suspended) or another terminal close (D-030) — or a config
+// without an address or sheet.
 //
 // after advo_cache/reader/reader.go:121-148: fail when leader and backup both refuse the first
 // dial → return after ConnectTimeout and keep reconnecting (R10).
-func New(cfg Config) (*Reader, error) {
+func New(cfg Config) (*Reader, error) { return newReader(cfg, time.Now) }
+
+// newReader is New with the reader's clock (D-039); in-package tests pass a manual one.
+func newReader(cfg Config, now func() time.Time) (*Reader, error) {
 	cfg = cfg.withDefaults()
 	if cfg.LeaderAddr == "" && cfg.BackupAddr == "" {
 		return nil, errors.New("reader: LeaderAddr or BackupAddr required")
@@ -148,7 +174,8 @@ func New(cfg Config) (*Reader, error) {
 		log:    cfg.Logger.With("sheet", cfg.Sheet),
 		ctx:    ctx,
 		cancel: cancel,
-		local:  newLocal(cfg.MaxEntries, missSeqMax, cfg.MissWindow),
+		local:  newLocal(cfg.MaxEntries, missSeqMax, cfg.MissWindow, now()),
+		now:    now,
 		first:  make(chan error, 1),
 	}
 	r.wg.Go(r.run)
@@ -177,13 +204,18 @@ func (r *Reader) signalFirst(err error) {
 func (r *Reader) isClosed() bool { return r.closed.Load() || r.ctx.Err() != nil }
 
 // entry returns the live local entry for key, or records a miss (R6). Disconnected = miss (R3).
+// A closed reader records nothing: it never sets again, so a miss record would only linger.
 func (r *Reader) entry(key string) (localEntry, bool) {
-	if r.connected.Load() && !r.closed.Load() {
-		if e, ok := r.local.lookup(key, time.Now()); ok {
+	if r.isClosed() {
+		return localEntry{}, false
+	}
+	now := r.now()
+	if r.connected.Load() {
+		if e, ok := r.local.lookup(key, now); ok {
 			return e, true
 		}
 	}
-	r.local.miss(key, time.Now())
+	r.local.miss(key, now)
 	return localEntry{}, false
 }
 
@@ -228,7 +260,7 @@ func (r *Reader) IsNull(key string) bool {
 	if !r.connected.Load() {
 		return false
 	}
-	e, ok := r.local.lookup(key, time.Now())
+	e, ok := r.local.lookup(key, r.now())
 	return ok && e.isNull()
 }
 
@@ -260,7 +292,7 @@ func (r *Reader) SetWithTTL(ctx context.Context, key string, value any, ttlMinut
 	if !r.connected.Load() {
 		return fmt.Errorf("reader: set %q: %w", key, ErrNotConnected)
 	}
-	o := op{kind: opSet, arg: key, value: raw, ttl: max(ttlMinutes, 0), baseSeq: r.local.baseSeq(key, time.Now())}
+	o := op{kind: opSet, arg: key, value: raw, ttl: max(ttlMinutes, 0), baseSeq: r.local.baseSeq(key, r.now())}
 	c, err := r.send(o, false)
 	if err != nil {
 		if errors.Is(err, ErrNotConnected) || errors.Is(err, ErrTimeout) {
@@ -344,6 +376,17 @@ func (r *Reader) deleteOp(ctx context.Context, o op) error {
 // IsConnected is true only after the sheet_state is loaded and every queued delete is acked.
 func (r *Reader) IsConnected() bool { return r.connected.Load() && !r.isClosed() }
 
+// LastError reports why the server ended this reader for good (D-030): ErrSuspended (close 4001
+// or an open refused "suspended"), ErrAdmitted (4002, key revoked) or ErrKicked (4003). After one
+// of them the reader is closed: IsConnected is false, writes return ErrClosed, it never
+// reconnects. nil while the reader is running, reconnecting, or was closed by its own caller.
+func (r *Reader) LastError() error {
+	if p := r.lastErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 // Close stops the reader and waits for its goroutines. It is idempotent; every later call except
 // Close returns ErrClosed (reads miss).
 func (r *Reader) Close() error {
@@ -351,4 +394,46 @@ func (r *Reader) Close() error {
 	r.cancel()
 	r.wg.Wait()
 	return nil
+}
+
+// release frees what a closed reader can never use again: the local map, the miss records and the
+// replay queue (a closed reader only misses and never replays). run defers it, so it runs once,
+// after the last session's read loop exited (Close waits for it); enqueueLocked drops a delete that
+// races the close, and entry records no miss once closed.
+func (r *Reader) release() {
+	r.local.reset()
+	r.cmu.Lock()
+	r.queue = nil
+	r.cmu.Unlock()
+}
+
+// Stats is a diagnostic snapshot of what a Reader holds. It is NOT part of the compatibility
+// contract (doc/protocol/wire.md): fields may be added, renamed or removed in any release.
+type Stats struct {
+	// Entries is the local map's size, expired entries not yet removed included (expiry is lazy:
+	// an expired entry is a miss and is dropped on eviction, invalidate or the next sheet_state).
+	Entries int
+	// PendingDeletes is every delete not yet acknowledged by a server: the replay queue (after an
+	// overflow, the one delete_prefix "" it collapsed to, D-005) plus the deletes in flight on the
+	// current connection, which teardown would requeue.
+	PendingDeletes int
+	// MissRecords is the number of keys with a miss record behind base_seq (R6), at most 65 536.
+	MissRecords int
+}
+
+// Stats returns the reader's current counts (D-038). A closed reader returns Stats{}.
+func (r *Reader) Stats() Stats {
+	var s Stats
+	s.Entries, s.MissRecords = r.local.counts()
+	r.cmu.Lock()
+	s.PendingDeletes = len(r.queue)
+	if r.sess != nil {
+		for _, c := range r.sess.pending {
+			if c.op.isDelete() {
+				s.PendingDeletes++
+			}
+		}
+	}
+	r.cmu.Unlock()
+	return s
 }

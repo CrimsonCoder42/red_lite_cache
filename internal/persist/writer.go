@@ -86,6 +86,7 @@ type Writer struct {
 	refused     atomic.Uint64 // batches refused for a stale epoch
 	unreported  atomic.Uint64 // dropped since the last Warn
 	lastDropLog atomic.Int64  // unix nanos of the last Warn
+	held        atomic.Int64  // ops in the failed batch Run holds for its one retry (Stats)
 
 	// parked holds sheet creates that could not be queued (full queue, or EnsureSheet), keyed by
 	// sheet name, latest wins. A create is never dropped: every entry row references its sheet row
@@ -214,6 +215,31 @@ func NewWriter(store *db.Store, o Options, active func() bool) *Writer {
 	return w
 }
 
+// NewWriterFlush is NewWriter with flush in place of the database: flush receives each planned
+// batch's statement count and epoch. It is the seam for tests outside this package (testing/leaks)
+// that drive the queue bound without Postgres; production code uses NewWriter.
+func NewWriterFlush(o Options, flush func(ctx context.Context, statements int, epoch uint64) error, active func() bool) *Writer {
+	w := NewWriter(nil, o, active)
+	w.flush = func(ctx context.Context, stmts []stmt, epoch uint64) error { return flush(ctx, len(stmts), epoch) }
+	return w
+}
+
+// Stats is a point-in-time count of what the writer holds (counts only, D-038).
+type Stats struct {
+	Queued  int    // ops in the queue (len of the channel, ≤ QueueSize)
+	Parked  int    // sheet creates parked for the next flush (≤ #sheets)
+	Held    int    // ops of the failed batch Run holds for its one retry
+	Dropped uint64 // ops dropped on a full queue since start
+}
+
+// Stats counts the queue, the parked creates and the held batch.
+func (w *Writer) Stats() Stats {
+	w.parkMu.Lock()
+	parked := len(w.parked)
+	w.parkMu.Unlock()
+	return Stats{Queued: len(w.ops), Parked: parked, Held: int(w.held.Load()), Dropped: w.dropped.Load()}
+}
+
 // Refused is the number of batches refused because a newer leader's epoch was stored.
 func (w *Writer) Refused() uint64 { return w.refused.Load() }
 
@@ -339,6 +365,7 @@ func (w *Writer) Run(ctx context.Context) error {
 			batch = nil
 		}
 		w.pruneRevocations(len(held) == 0)
+		w.held.Store(int64(len(held)))
 	}
 
 	for {

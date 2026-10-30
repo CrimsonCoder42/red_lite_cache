@@ -58,9 +58,11 @@ type local struct {
 	missMax     int
 	missWindow  time.Duration
 	missBase    time.Time // origin of the missWindow/2 slices
+	missSwept   time.Time // the last sweep of records with no live entry (sweepMissLocked)
 	fallback    uint64
 	fallbackAt  time.Time // the newest dropped entry's miss time; the fallback is live for missWindow after it
 	hasFallback bool
+	released    bool // reset ran: the reader is closed and records no more misses
 }
 
 // missRec is one miss: the applied seq and the time.
@@ -76,14 +78,34 @@ type missRecs struct {
 	n int
 }
 
-func newLocal(maxEntries, missMax int, missWindow time.Duration) *local {
+// newLocal builds an empty local map; now is the reader's clock reading at construction (D-039).
+func newLocal(maxEntries, missMax int, missWindow time.Duration, now time.Time) *local {
 	return &local{
 		entries:    make(map[string]localEntry),
 		max:        maxEntries,
 		missSeq:    make(map[string]*missRecs),
 		missMax:    missMax,
 		missWindow: missWindow,
-		missBase:   time.Now(),
+		missBase:   now,
+		missSwept:  now,
+	}
+}
+
+// sweepMissLocked drops every miss record with no live entry, at most once per missWindow. A record
+// with no live entry behaves exactly as an absent one (baseSeq deletes it and falls through; miss
+// refills it as a new record), so dropping it changes no base_seq; a record with a live entry is
+// only pruned of its dead entries, which baseSeq and miss do anyway. Without it, a key missed once
+// and never read again kept its record until missMax keys accumulated (D-039 finding). Cost: one
+// pass over at most missMax records per missWindow, on the first new-key miss after the window.
+func (l *local) sweepMissLocked(now time.Time) {
+	if now.Sub(l.missSwept) < l.missWindow {
+		return
+	}
+	l.missSwept = now
+	for k, rs := range l.missSeq {
+		if !l.pruneLocked(rs, now) {
+			delete(l.missSeq, k)
+		}
 	}
 }
 
@@ -129,6 +151,9 @@ func (l *local) lookup(key string, now time.Time) (localEntry, bool) {
 func (l *local) miss(key string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
 	rs, ok := l.missSeq[key]
 	if ok {
 		l.pruneLocked(rs, now)
@@ -143,6 +168,7 @@ func (l *local) miss(key string, now time.Time) {
 		rs.n++
 		return
 	}
+	l.sweepMissLocked(now)
 	if len(l.missSeq) >= l.missMax {
 		for k, rs := range l.missSeq {
 			if !l.pruneLocked(rs, now) {
@@ -247,7 +273,7 @@ func (l *local) removeLocked(kind opKind, arg string) {
 		delete(l.entries, arg)
 	case opDeletePrefix:
 		if arg == "" {
-			clear(l.entries)
+			l.entries = make(map[string]localEntry)
 			return
 		}
 		for k := range l.entries {
@@ -264,10 +290,19 @@ func (l *local) removeLocked(kind opKind, arg string) {
 	}
 }
 
+// shrinkLocked replaces an emptied map by a fresh one: a Go map never shrinks on delete, so a map
+// drained key by key would keep its peak bucket array for the reader's life. Caller holds mu.
+func (l *local) shrinkLocked() {
+	if len(l.entries) == 0 {
+		l.entries = make(map[string]localEntry)
+	}
+}
+
 // remove applies a delete-shaped op under one lock pass and applies its seq.
 func (l *local) remove(kind opKind, arg string, seq uint64) {
 	l.mu.Lock()
 	l.removeLocked(kind, arg)
+	l.shrinkLocked()
 	l.bumpLocked(seq)
 	l.mu.Unlock()
 }
@@ -291,6 +326,7 @@ func (l *local) invalidate(m protocol.Invalidate) {
 	if m.Suffix != nil {
 		l.removeLocked(opDeleteSuffix, *m.Suffix)
 	}
+	l.shrinkLocked()
 	l.bumpLocked(m.Seq)
 }
 
@@ -323,6 +359,23 @@ func (l *local) replace(s protocol.SheetState, now time.Time) {
 		l.fallback = 0
 	}
 	l.mu.Unlock()
+}
+
+// reset frees the map, the miss records and the fallback: the reader is closed and only misses.
+func (l *local) reset() {
+	l.mu.Lock()
+	l.entries = make(map[string]localEntry)
+	l.missSeq = make(map[string]*missRecs)
+	l.fallback, l.fallbackAt, l.hasFallback = 0, time.Time{}, false
+	l.released = true
+	l.mu.Unlock()
+}
+
+// counts returns len(entries) and len(missSeq) under one read lock.
+func (l *local) counts() (entries, misses int) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.entries), len(l.missSeq)
 }
 
 func (l *local) len() int {

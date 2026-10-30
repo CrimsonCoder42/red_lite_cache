@@ -49,6 +49,9 @@ func TestNewFieldsOmittedWhenZero(t *testing.T) {
 		{`{"type":"replicate","key":"k","value":1}`, Replicate{Type: TypeReplicate, Key: "k", Value: json.RawMessage(`1`)}},
 		{`{"type":"invalidate","key":"k"}`, Invalidate{Type: TypeInvalidate, Key: "k"}},
 		{`{"type":"sheet_state","data":{}}`, SheetState{Type: TypeSheetState, Data: map[string]json.RawMessage{}}},
+		// criterion 12 (tenancy): a v1 open — no api_key, no version — encodes exactly as advo_cache's
+		{`{"action":"open","sheet":"s","password":"p"}`, Request{Action: ActionOpen, Sheet: "s", Password: "p"}},
+		{`{"action":"open","sheet":"s","password":"p","api_key":"rlk_x"}`, Request{Action: ActionOpen, Sheet: "s", Password: "p", APIKey: "rlk_x"}},
 	}
 	for _, c := range cases {
 		b, err := json.Marshal(c.frame)

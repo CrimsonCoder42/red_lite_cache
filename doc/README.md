@@ -3,6 +3,7 @@
 | File | What it holds |
 |---|---|
 | `purpose.md` | Why this exists: the one consumer, the API it really calls, requirements R1–R12 from its workarounds |
+| `audit_2026-10-29.md` | Post-bootstrap audit: every K/R row verified in code; what remains (replica auth, R6 simplification, eviction policy, R7 index, Postgres unproven) |
 | `assessment_2026-10-29.md` | advo_cache vs the examples vs production patterns: where it succeeds, where it falls short, what hurts most; K9–K16 |
 | `scope/SCOPE.md` | What we are building, the slices, their status |
 | `specs/<feature>.md` | One spec per slice, from `specs/TEMPLATE.md` |

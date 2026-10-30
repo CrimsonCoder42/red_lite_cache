@@ -55,3 +55,17 @@ sql:
         emit_interface: true
         emit_empty_slices: true
         overrides: *overrides
+
+  # Audit: admin mutations and session open/close/kick (000002, D-019, D-026)
+  - schema: "./db/migration"
+    queries: "./db/query/audit"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "audit"
+        out: "./db/sqlc/audit"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        emit_empty_slices: true
+        overrides: *overrides
