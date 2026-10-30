@@ -8,8 +8,9 @@ import (
 )
 
 // RunJanitor is the ONE expiry goroutine of the process (D-003): every interval it runs ExpireAll
-// over the registry, skipping the pass while active() is false (a replica applies the leader's
-// replicate_expire instead). It returns nil when ctx is done. The caller owns the goroutine
+// over the registry (which also prunes every sweep log by age). While active() is false (a replica
+// applies the leader's replicate_expire instead) it expires no key and only runs PruneSweepLogs, so
+// the logs ApplyReplicated fills do not linger. It returns nil when ctx is done. The caller owns the goroutine
 // (app's errgroup); RunJanitor starts none.
 //
 // after code-heim go_18_worker_pool (doc/reference/codeheim_patterns.md § Tier 2): one ctx-cancelled
@@ -23,6 +24,9 @@ func RunJanitor(ctx context.Context, r *Registry, interval time.Duration, active
 			return nil
 		case <-t.C:
 			if active != nil && !active() {
+				if n := r.PruneSweepLogs(r.now()); n > 0 {
+					logger.L.Debug("Sheet: sweep logs pruned", "entries", n, "sheets", r.Len())
+				}
 				continue
 			}
 			if n := r.ExpireAll(r.now()); n > 0 {

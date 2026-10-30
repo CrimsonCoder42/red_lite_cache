@@ -78,6 +78,29 @@ No goroutine per entry, per sheet, or per request beyond net/http's own. Every o
 `ws.Conn`) and `db`. `reader` imports only `protocol` and `github.com/coder/websocket`
 (`go list -deps ./reader`). No package imports `cmd`.
 
+## Bounds
+
+Every structure that can accumulate, its cap, how it is freed, the Stats field that measures it (D-040) and the
+leak test that proves it returns to baseline (`testing/leaks`, D-038; numbers in `doc/leaks_2026-10-29/README.md`).
+
+| Structure | Cap (config var, default) | Freed on | Stats field | Test |
+|---|---|---|---|---|
+| sheet store entries + root/tail/head buckets | `REDLITE_CACHE_MAX_KEYS_PER_SHEET` (0 = unbounded) + TTL | Expire, Delete*, Replace; empty buckets dropped; maps replaced when the last key goes | `sheet.Stats.Store` | L1, L2, L12 |
+| sweep log (per sheet) | `REDLITE_SWEEP_LOG_MAX` 4 096, `REDLITE_SWEEP_LOG_WINDOW` 30 s | every write, every janitor pass (replica too) | `SweepLogEntries` | L5 |
+| sheets | none — never evicted (D-013, D-042) | Drop (revoke), Remove (replica resync) | `Sheets` | L11, L12 |
+| collaborators | per connection | Leave, full queue kick, drop | `Collaborators` | L6, L7, L11 |
+| per-connection send queue | `REDLITE_CONN_SEND_QUEUE` 256 (`REDLITE_REPLICA_SEND_QUEUE` 4 096) | connection close; full = kick | `ws.Conn.Queued`, `App.QueuedFrames` | L6 |
+| goroutines per connection | 3 (read, writer, ping) | connection close | `HealthStats.Goroutines` | L6, L7, L9 |
+| sessions | per connection | close, kick, suspend, revoke | `session.Registry.Len` | L6, L7 |
+| locks + owner index | per connection × key, `REDLITE_LOCK_TTL` | owner disconnect, cleaner tick | `lock.Stats{Held, Owners}` | L9 |
+| tenant revoked names / dead key ids | `REDLITE_TENANT_MEMORY_MAX` 10 000 each, oldest dropped, one Warn | restart | `tenant.Stats{RevokedNames, DeadKeys, *Dropped}` | L8 |
+| persist queue / parked / held | `REDLITE_PERSIST_QUEUE_SIZE` 10 000; parked ≤ sheets; held ≤ one batch | flush | `persist.Stats{Queued, Parked, Held, Dropped}` | L10 |
+| reader local map | `reader.Config.MaxEntries` 100 000 | invalidate, eviction, Close (map replaced when emptied) | `reader.Stats.Entries` | L3, L2, L12 |
+| reader pending deletes | `reader.Config.MaxPendingDeletes` 10 000 → collapses to `delete_prefix ""` | replay on reconnect, Close | `PendingDeletes` | L4 |
+| reader miss records | 65 536 keys | dead records swept once per MissWindow; Close | `MissRecords` | L3, `reader` `TestMissRecordsSweptAfterWindow` |
+
+Known gap: with persistence off a replica keeps a revoked project's sheets until it resyncs (F-1, `doc/ASSUMPTIONS.md`).
+
 ## Failure behaviour
 
 | Failure | What happens |

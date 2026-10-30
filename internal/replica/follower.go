@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"sync"
 	"time"
 
@@ -101,7 +102,7 @@ func (n *Node) follow(ctx context.Context, target string) bool {
 // accepted the register.
 func (n *Node) session(ctx context.Context, u string) (connected bool, err error) {
 	dctx, dcancel := context.WithTimeout(ctx, n.opts.HeartbeatTimeout)
-	c, _, err := websocket.Dial(dctx, u, nil)
+	c, _, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPHeader: bearer(n.opts.ClusterToken)})
 	dcancel()
 	if err != nil {
 		return false, fmt.Errorf("replica: dial %s: %w", u, err)
@@ -186,6 +187,8 @@ func (a *applier) apply(data []byte) error {
 	switch h.Type {
 	case protocol.TypeHeartbeat:
 		return nil
+	case protocol.TypeProjectSuspended, protocol.TypeProjectResumed, protocol.TypeKeyRevoked, protocol.TypeSessionKill:
+		return a.control(data, h.Type)
 	case protocol.TypeSnapshotSheet, protocol.TypeReplicateSheet:
 		var f protocol.ReplicaSheet
 		if err := json.Unmarshal(data, &f); err != nil {
@@ -235,6 +238,28 @@ func (a *applier) apply(data []byte) error {
 	}
 	logger.L.Debug("Replica: unknown frame type", "type", h.Type)
 	return nil
+}
+
+// control hands one tenancy control frame (already past the epoch check) to Options.OnControl;
+// the replica applies nothing itself — internal/app owns the tenant directory and sessions.
+func (a *applier) control(data []byte, typ string) error {
+	var f protocol.ReplicaControl
+	if err := json.Unmarshal(data, &f); err != nil {
+		return fmt.Errorf("replica: decode %s: %w", typ, err)
+	}
+	logger.L.Info("Replica: control received", "type", f.Type, "project", f.Project, "key_id", f.KeyID, "session", f.Session, "epoch", f.Epoch)
+	if a.n.opts.OnControl != nil {
+		a.n.opts.OnControl(f)
+	}
+	return nil
+}
+
+// bearer is the Authorization header carrying the cluster token (D-031); nil when there is none.
+func bearer(token string) http.Header {
+	if token == "" {
+		return nil
+	}
+	return http.Header{"Authorization": {"Bearer " + token}}
 }
 
 // sheet applies snapshot_sheet (identity + whole state) or replicate_sheet (identity only).

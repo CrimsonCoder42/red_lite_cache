@@ -12,6 +12,7 @@ import (
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/ws"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
@@ -46,7 +47,19 @@ type replicaSession struct {
 // moved from /ws to its own path, the one full_state frame became one frame per sheet taken under
 // the sheet mutex (K6), the reply comes first and carries the epoch, and a replica with a higher
 // epoch fences this leader (D-012).
+//
+// D-031: the cluster token is checked before the hub, the upgrade or any read — a peer without it
+// gets 401 and not one byte of the snapshot.
 func (n *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !tenant.CheckBearer(r, n.opts.ClusterToken) {
+		reason := "wrong cluster token"
+		if r.Header.Get("Authorization") == "" {
+			reason = "missing cluster token"
+		}
+		logger.L.Warn("Replica: peer refused", "remote", r.RemoteAddr, "reason", reason)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if !n.hub.enter() {
 		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
 		return
@@ -319,7 +332,7 @@ func (n *Node) probeLoop(ctx context.Context) {
 		case <-t.C:
 		case <-n.probeNow: // a client or replica claimed a higher epoch: verify it now
 		}
-		h, err := probe(ctx, client, u)
+		h, err := probe(ctx, client, u, n.opts.ClusterToken)
 		if err != nil {
 			logger.L.Debug("Replica: peer probe failed", "peer", u, "err", err)
 			continue
@@ -331,11 +344,16 @@ func (n *Node) probeLoop(ctx context.Context) {
 	}
 }
 
-func probe(ctx context.Context, client *http.Client, u string) (protocol.Health, error) {
+// probe GETs the peer's /health with the cluster token (D-031): without it the peer answers only
+// {"status":"ok"}, no role or epoch, and could never fence this node.
+func probe(ctx context.Context, client *http.Client, u, token string) (protocol.Health, error) {
 	var h protocol.Health
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return h, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -347,4 +365,26 @@ func probe(ctx context.Context, client *http.Client, u string) (protocol.Health,
 	}
 	err = json.NewDecoder(resp.Body).Decode(&h)
 	return h, err
+}
+
+// SendControl sends one tenancy control frame to every registered replica (leader side), through
+// each replica's send queue like any stream frame; a full queue kicks that replica (it resyncs).
+// The frame carries this node's epoch. A no-op on a replica or with no replica connected.
+func (n *Node) SendControl(c protocol.ReplicaControl) {
+	if !n.IsLeader() || n.hub.len() == 0 {
+		return
+	}
+	c.Epoch = n.Epoch()
+	b, err := json.Marshal(c)
+	if err != nil {
+		logger.L.Error("Replica: control encode failed", "type", c.Type, "err", err)
+		return
+	}
+	n.hub.each(func(rc *replicaConn) {
+		if !rc.c.Send(b) {
+			logger.L.Warn("Replica: send queue full", "instance_id", rc.instanceID, "phase", "control", "cap", n.opts.SendQueue)
+			rc.c.Kick("replica send queue full")
+		}
+	})
+	logger.L.Info("Replica: control sent", "type", c.Type, "project", c.Project, "replicas", n.hub.len())
 }

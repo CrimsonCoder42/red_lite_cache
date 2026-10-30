@@ -1,21 +1,23 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/lock"
-	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
-// session is one connection's routing state. Only the connection's read goroutine touches it
+// client is one connection's routing state. Only the connection's read goroutine touches it
 // (handle, then end), so it needs no lock.
-type session struct {
+type client struct {
+	ctx   context.Context // the upgrade request's: bounds admission's key lookup
 	h     *Handler
 	c     *Conn
 	sheet *sheet.Sheet // nil until open succeeds
@@ -39,7 +41,7 @@ type failure struct {
 //
 // after advo_cache/ws/handler.go:120-216 (the read loop and handleAction): same open-first gate and
 // switch, plus the leader and epoch gates (D-012), and one log line per refusal at the router.
-func (s *session) handle(frame []byte) {
+func (s *client) handle(frame []byte) {
 	var req protocol.Request
 	if err := json.Unmarshal(frame, &req); err != nil {
 		s.refuse(req, failure{msg: protocol.ErrMsgInvalidJSON, err: err})
@@ -50,7 +52,7 @@ func (s *session) handle(frame []byte) {
 	}
 }
 
-func (s *session) route(req protocol.Request) *failure {
+func (s *client) route(req protocol.Request) *failure {
 	if req.Action == protocol.ActionOpen {
 		return s.open(req)
 	}
@@ -101,7 +103,7 @@ func (s *session) route(req protocol.Request) *failure {
 }
 
 // gate refuses a write on a replica (not leader) or from a client that has seen a newer leader.
-func (s *session) gate(req protocol.Request) *failure {
+func (s *client) gate(req protocol.Request) *failure {
 	if !s.h.node.IsLeader() {
 		return &failure{msg: protocol.ErrMsgNotLeader}
 	}
@@ -114,12 +116,14 @@ func (s *session) gate(req protocol.Request) *failure {
 	return nil
 }
 
-// open joins a sheet. Wrong password: the reply, then the socket closes.
+// open admits the connection to a sheet (admit.go), starts its session and joins the sheet: the
+// reply, then the sheet_state.
 //
 // after advo_cache/ws/handler.go:222-255 (handleOpen): GetOrCreateSheet + AddCollaborator + reply +
-// a separate sheet_state write became one sheet.Join that enqueues the reply and the state under the
-// sheet mutex; creation follows REDLITE_SHEET_AUTOCREATE (D-013).
-func (s *session) open(req protocol.Request) *failure {
+// a separate sheet_state write became admission through tenant.Directory (D-024/D-025/D-027), a
+// session (D-026) and one sheet.Join that enqueues the reply and the state under the sheet mutex;
+// creation follows REDLITE_SHEET_AUTOCREATE (D-013) in password mode only.
+func (s *client) open(req protocol.Request) *failure {
 	if f := s.gate(req); f != nil {
 		return f
 	}
@@ -129,20 +133,12 @@ func (s *session) open(req protocol.Request) *failure {
 	if s.sheet != nil {
 		return &failure{msg: protocol.ErrMsgAlreadyOpen, err: errors.New("already in sheet " + s.sheet.Name())}
 	}
-	sh, _, err := s.h.reg.Open(req.Sheet, req.Password)
-	switch {
-	case errors.Is(err, sheet.ErrBadPassword):
-		logger.L.Warn("WS: bad password", "sheet", req.Sheet, "remote", s.c.Remote(), "conn_id", s.c.ID())
-		s.c.SendAndClose(s.encode(protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword}), websocket.StatusPolicyViolation, protocol.ErrMsgInvalidPassword)
-		return nil
-	case errors.Is(err, sheet.ErrSheetNotFound):
-		return &failure{msg: protocol.ErrMsgSheetNotFound, err: err, expected: true}
-	case errors.Is(err, sheet.ErrNameRequired):
-		return &failure{msg: protocol.ErrMsgSheetAndPassword}
-	case err != nil:
-		return &failure{msg: protocol.ErrMsgInternal, err: err}
+	sh, keyID, f := s.admit(req)
+	if sh == nil {
+		return f // nil when the refusal was already sent and the socket is closing
 	}
 	epoch := s.h.node.Epoch()
+	sess := s.startSession(sh, keyID, epoch)
 	s.sheet = sh
 	sh.Join(s.c, epoch, func(seq uint64) []byte {
 		return s.encode(protocol.Response{
@@ -150,13 +146,21 @@ func (s *session) open(req protocol.Request) *failure {
 			ProtocolVersion: protocol.Version, Epoch: epoch, Seq: seq,
 		})
 	})
+	// A suspend or key revoke that ran between Admit and sessions.Add found no session to close:
+	// close it now (revokers mark the key dead before KillWhere, so one of the two sees it).
+	switch {
+	case s.h.tenants.Suspended(sh.ProjectID()):
+		sess.Kill(protocol.CloseSuspended, protocol.CloseReasonSuspended)
+	case keyID != uuid.Nil && s.h.tenants.KeyRevoked(keyID):
+		sess.Kill(protocol.CloseKeyRevoked, protocol.CloseReasonKeyRevoked)
+	}
 	return nil
 }
 
 // get answers from the sheet's store; a miss is an expected outcome.
 //
 // after advo_cache/ws/handler.go:271-282 (handleGet).
-func (s *session) get(req protocol.Request) *failure {
+func (s *client) get(req protocol.Request) *failure {
 	e, ok := s.sheet.Get(req.Key)
 	if !ok {
 		return &failure{msg: protocol.ErrMsgKeyNotFound, expected: true}
@@ -171,7 +175,7 @@ func (s *session) get(req protocol.Request) *failure {
 // after advo_cache/ws/handler.go:284-356 (handleSet, handleDelete*): store, reply, broadcast and
 // replicate as four separate steps became one Apply under the sheet mutex (D-014); set_null is an
 // OpSet of protocol.NullValue (handler.go:438-451).
-func (s *session) apply(req protocol.Request, m sheet.Mutation) *failure {
+func (s *client) apply(req protocol.Request, m sheet.Mutation) *failure {
 	res := s.sheet.Apply(s.c, m, func(r sheet.Result) []byte {
 		resp := protocol.Response{Success: r.Err == nil, ID: req.ID, Seq: r.Seq}
 		if r.Err != nil {
@@ -210,7 +214,7 @@ func errMsg(err error) string {
 //
 // after advo_cache/ws/handler.go:371-405 (handleLock): the owner is the connection id, the second
 // IsLocked lookup is gone, and nothing is replicated (locks die with their connection).
-func (s *session) lock(req protocol.Request) *failure {
+func (s *client) lock(req protocol.Request) *failure {
 	if req.Key == "" {
 		return &failure{msg: protocol.ErrMsgKeyRequired}
 	}
@@ -228,7 +232,7 @@ func (s *session) lock(req protocol.Request) *failure {
 // unlock releases a lock this connection owns.
 //
 // after advo_cache/ws/handler.go:407-436 (handleUnlock).
-func (s *session) unlock(req protocol.Request) *failure {
+func (s *client) unlock(req protocol.Request) *failure {
 	if req.Key == "" {
 		return &failure{msg: protocol.ErrMsgKeyRequired}
 	}
@@ -245,21 +249,23 @@ func (s *session) unlock(req protocol.Request) *failure {
 	return nil
 }
 
-// end runs once the socket has closed: leave the sheet, release this connection's locks.
+// end runs once the socket has closed (err is what Run returned): leave the sheet, end the
+// session, release this connection's locks.
 //
 // after advo_cache/ws/handler.go:136-167 (onDisconnect): the delete-sheet-on-last-leave is gone
 // (K13) and the lock release is O(locks owned).
-func (s *session) end() {
+func (s *client) end(err error) {
 	if s.sheet != nil {
 		s.sheet.Leave(s.c)
 	}
+	s.endSession(err)
 	if n := s.h.locks.ReleaseAll(s.c.ID()); n > 0 {
 		s.c.log.Info("Lock: released on disconnect", "locks", n)
 	}
 }
 
 // refuse logs f once and replies with it.
-func (s *session) refuse(req protocol.Request, f failure) {
+func (s *client) refuse(req protocol.Request, f failure) {
 	s.log(req, f)
 	resp := protocol.Response{ID: req.ID, Error: f.msg, Key: f.key}
 	if f.closeAfter {
@@ -272,7 +278,7 @@ func (s *session) refuse(req protocol.Request, f failure) {
 	}
 }
 
-func (s *session) log(req protocol.Request, f failure) {
+func (s *client) log(req protocol.Request, f failure) {
 	attrs := []any{"action", req.Action, "sheet", s.sheetName(req), "error", f.msg}
 	if f.err != nil {
 		attrs = append(attrs, "err", f.err)
@@ -284,7 +290,7 @@ func (s *session) log(req protocol.Request, f failure) {
 	s.c.log.Warn("WS: action failed", attrs...)
 }
 
-func (s *session) sheetName(req protocol.Request) string {
+func (s *client) sheetName(req protocol.Request) string {
 	if s.sheet != nil {
 		return s.sheet.Name()
 	}
@@ -292,7 +298,7 @@ func (s *session) sheetName(req protocol.Request) string {
 }
 
 // reply enqueues a direct reply; a full queue kicks the connection (D-014).
-func (s *session) reply(resp protocol.Response) {
+func (s *client) reply(resp protocol.Response) {
 	if !s.c.Send(s.encode(resp)) {
 		s.c.Kick("send queue full")
 	}
@@ -300,7 +306,7 @@ func (s *session) reply(resp protocol.Response) {
 
 // encode marshals a Response. Response holds only strings, numbers and json.RawMessage the server
 // already parsed, so it cannot fail; a failure is still answered with the internal error.
-func (s *session) encode(resp protocol.Response) []byte {
+func (s *client) encode(resp protocol.Response) []byte {
 	b, err := json.Marshal(resp)
 	if err != nil {
 		s.c.log.Error("WS: reply encode failed", "err", err)

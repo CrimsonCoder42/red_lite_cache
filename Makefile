@@ -76,12 +76,12 @@ dev-pair:
 	$(MAKE) -j2 dev-leader dev-replica
 
 dev-leader:
-	REDLITE_ROLE=leader REDLITE_PORT=$(LEADER_PORT) REDLITE_INSTANCE_ID=leader-dev \
+	REDLITE_ROLE=leader REDLITE_PORT=$(LEADER_PORT) REDLITE_INSTANCE_ID=leader-dev REDLITE_CLUSTER_TOKEN=dev-cluster-token \
 	REDLITE_PEER_ADDRESS=ws://localhost$(REPLICA_PORT) \
 	air -build.cmd "go build -o ./tmp/leader ./cmd/redlite" -build.bin "./tmp/leader"
 
 dev-replica:
-	REDLITE_ROLE=replica REDLITE_PORT=$(REPLICA_PORT) REDLITE_INSTANCE_ID=replica-dev \
+	REDLITE_ROLE=replica REDLITE_PORT=$(REPLICA_PORT) REDLITE_INSTANCE_ID=replica-dev REDLITE_CLUSTER_TOKEN=dev-cluster-token \
 	REDLITE_LEADER_ADDRESS=ws://localhost$(LEADER_PORT)/replica \
 	REDLITE_PEER_ADDRESS=ws://localhost$(LEADER_PORT) \
 	air -build.cmd "go build -o ./tmp/replica ./cmd/redlite" -build.bin "./tmp/replica"

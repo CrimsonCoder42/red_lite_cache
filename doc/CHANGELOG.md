@@ -1,5 +1,42 @@
 # Changelog
 
+- 2026-10-29 — leak suite (D-038…D-042; next tag **v0.3.1**: additive `reader.Stats`, no wire change beyond the
+  development-only `/health` `"stats"`): `testing/leaks/` L1–L12 + 6 edge cases (BASELINE → FILL → OBSERVE → DRAIN →
+  ASSERT); harness `integration.NewClock/WithClock/GoroutineBaseline/WaitGoroutines/HeapAlloc`; `config.Clock`
+  (test seam) and `REDLITE_TENANT_MEMORY_MAX`; `Stats()` on cache.Store, sheet.Registry, lock.Manager,
+  tenant.Directory, persist.Writer, ws.Conn/Handler, reader.Reader, `App.Stats`. Lingering data fixed: idle and
+  replica sweep logs pruned by the janitor; reader miss records swept once per window; a closed reader frees
+  its map/queue/misses; tenant revoked names and dead keys bounded (`internal/tenant/bounded.go`); emptied server
+  store and reader maps replaced (Go maps never shrink). Found, not fixed: F-1 (replica keeps a revoked project's
+  sheets with persistence off; D-043 recommended). `bash testing/run.sh`: `355 | 341 | 0 | 14` twice
+  (14 = persist, no `REDLITE_TEST_DATABASE_URL`); leaks `-count=2` all pass, L12 `-count=3` all pass.
+
+- 2026-10-29 — consumer conformance (D-032…D-037; next tag **v0.3.0**: new public package `reader/v1compat`;
+  `reader/` and `protocol/` unchanged, no wire change): `testing/conformance/` — `consumerstore.go` (miniature of
+  backendAdvo's `cachedOne`/`cachedList`/`invalidateDomain` without the second sweep/`invalidateDomainBoth`, FakeDB
+  load counter), `keycorpus.go` (93 key shapes on 27 roots read from backendAdvo `cache/keys.go`), C1–C11, C13 (key
+  mode), edge cases, C12 (`v1compat_test.go`), B1 (`bench_test.go`, on the corpus); `reader/v1compat` (advo_cache's
+  reader surface over `reader.Reader`); `internal/cache` patient-head index (D-037, kept: on real shapes profile sweep 0.44×,
+  miss sweep 0.039×, new key 1.43×); `doc/consumer/backendadvo_migration.md`, `doc/specs/s7_migration.md`. `bash testing/run.sh`:
+  `327 | 314 | 0 | 13` (13 = persist, no `REDLITE_TEST_DATABASE_URL`).
+
+- 2026-10-29 — tenancy (S8, `.claude/prompts/tenancy.md`, D-024…D-031; next tag v0.2.0): **admission** — `open` takes
+  `api_key`; `REDLITE_ADMISSION=key` (production default) requires the project's key and answers every refusal
+  `not authorized`; password mode is v1 unchanged (`internal/tenant`, `internal/ws/admit.go`); autocreate forced off
+  outside development. **Sessions** — `internal/session` registry per node, last_seen/frames lock-free, audited.
+  **Admin API** — GET /admin/projects[/{id}], POST /admin/projects/{id}/keys, DELETE /admin/keys/{id},
+  POST /admin/keys/{id}/rotate, POST /admin/projects/{id}/suspend|resume, GET /admin/sessions (both nodes),
+  GET /admin/sheets/{name}/sessions, DELETE /admin/sessions/{id} (`internal/api/{tenancy,sessions,touch}.go`);
+  suspend/revoke/kill propagate by NOTIFY and the replica stream (control frames). **Reader** — `Config.APIKey`,
+  terminal close codes 4001/4002/4003 → `LastError()` = ErrSuspended/ErrAdmitted/ErrKicked, no reconnect.
+  **Peer auth** — `/replica` 401 without `REDLITE_CLUSTER_TOKEN` (before upgrade), probe and dial send it, `/health`
+  hides role/epoch without it, production refuses to boot without it. Migration `000002_tenancy` (suspended_at,
+  last_used_at, label, `audit_events` partitioned + BRIN); `audit` sqlc package; persist auditor. Docs: wire.md,
+  release.md runbook, purpose.md "Admission and removal", s3/s4/s6 specs. `bash testing/run.sh`: `238 | 225 | 0 | 13` (after the review fixes: revoked-key race, project revoke closes 4002, admission lookup bounded at 2 s, /health omits empty fields)
+  (13 = persist, no `REDLITE_TEST_DATABASE_URL`).
+
+- 2026-10-29 — `doc/audit_2026-10-29.md`: bootstrap verified from the code (not the report): K1–K16 and R1–R12 each cited to a file/test; 0 sync.Map, 0 goroutine-per-entry, 0 fmt.Print, 51 origin comments. Remaining: `/replica` unauthenticated (the one stream defect reproduced), R6 miss window to simplify, reader eviction policy (D-024), R7 two-segment index, Postgres paths unproven.
+
 - 2026-10-29 — bootstrap wave 5 (D-019…D-022 added to bootstrap.md mid-run, + second review): persist flush fenced on
   each op's acceptance term vs `cluster_state` (`internal/persist/writer.go` oldestTerm; `TestFlushFencesOnAcceptanceTerm`);
   writer/cleaner stop only after WS connections closed (shutdown flushes everything); `REDLITE_PERSIST_LOGGED`

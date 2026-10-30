@@ -13,12 +13,34 @@ import (
 )
 
 type ApiKey struct {
-	ID        uuid.UUID          `json:"id"`
-	ProjectID uuid.UUID          `json:"project_id"`
-	KeyHash   []byte             `json:"key_hash"`
-	KeyPrefix string             `json:"key_prefix"`
-	CreatedAt time.Time          `json:"created_at"`
-	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+	ID         uuid.UUID          `json:"id"`
+	ProjectID  uuid.UUID          `json:"project_id"`
+	KeyHash    []byte             `json:"key_hash"`
+	KeyPrefix  string             `json:"key_prefix"`
+	CreatedAt  time.Time          `json:"created_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+	Label      string             `json:"label"`
+}
+
+type AuditEvent struct {
+	At        time.Time       `json:"at"`
+	Node      string          `json:"node"`
+	ProjectID pgtype.UUID     `json:"project_id"`
+	Actor     string          `json:"actor"`
+	Action    string          `json:"action"`
+	Subject   string          `json:"subject"`
+	Detail    json.RawMessage `json:"detail"`
+}
+
+type AuditEventsDefault struct {
+	At        time.Time       `json:"at"`
+	Node      string          `json:"node"`
+	ProjectID pgtype.UUID     `json:"project_id"`
+	Actor     string          `json:"actor"`
+	Action    string          `json:"action"`
+	Subject   string          `json:"subject"`
+	Detail    json.RawMessage `json:"detail"`
 }
 
 type CacheEntry struct {
@@ -38,11 +60,12 @@ type ClusterState struct {
 }
 
 type Project struct {
-	ID         uuid.UUID   `json:"id"`
-	Name       string      `json:"name"`
-	CreatedAt  time.Time   `json:"created_at"`
-	QuotaKeys  pgtype.Int8 `json:"quota_keys"`
-	QuotaBytes pgtype.Int8 `json:"quota_bytes"`
+	ID          uuid.UUID          `json:"id"`
+	Name        string             `json:"name"`
+	CreatedAt   time.Time          `json:"created_at"`
+	QuotaKeys   pgtype.Int8        `json:"quota_keys"`
+	QuotaBytes  pgtype.Int8        `json:"quota_bytes"`
+	SuspendedAt pgtype.Timestamptz `json:"suspended_at"`
 }
 
 type Sheet struct {

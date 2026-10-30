@@ -151,6 +151,37 @@ func checkIndex(t *testing.T, s *Store) {
 	}
 	count(s.roots, rootOf)
 	count(s.tails, tailOf)
+	if s.heads == nil {
+		return
+	}
+	// heads: exactly the head-shaped keys, each under its own root and head, no empty bucket.
+	want := 0
+	for k := range s.m {
+		if _, _, _, ok := headOf(k); ok {
+			want++
+		}
+	}
+	n := 0
+	for root, hs := range s.heads {
+		if len(hs) == 0 {
+			t.Fatalf("empty head root %q kept", root)
+		}
+		for head, set := range hs {
+			if len(set) == 0 {
+				t.Fatalf("empty head bucket %q kept", head)
+			}
+			for k := range set {
+				r, h, _, ok := headOf(k)
+				if _, in := s.m[k]; !in || !ok || r != root || h != head {
+					t.Fatalf("head bucket %q/%q holds %q (in map: %v)", root, head, k, in)
+				}
+				n++
+			}
+		}
+	}
+	if n != want {
+		t.Fatalf("head index holds %d keys, map has %d head-shaped keys", n, want)
+	}
 }
 
 func TestPrefixSuffixCases(t *testing.T) {
@@ -295,6 +326,119 @@ func TestIndexRandomOps(t *testing.T) {
 			t.Fatalf("op %d: Len %d, model %d", i, s.Len(), len(m))
 		}
 		checkIndex(t, s)
+	}
+}
+
+func TestHeadOf(t *testing.T) {
+	cases := []struct {
+		in, root, head string
+		closed, ok     bool
+	}{
+		{"r:patient:u1:view", "r", "r:patient:u1", true, true},
+		{"r:patient:u1", "r", "r:patient:u1", false, true},
+		{"r:patient:u", "r", "r:patient:u", false, true},
+		{"r:patient:u1:", "r", "r:patient:u1", true, true},
+		{":patient:u1:x", "", ":patient:u1", true, true},
+		{"r:patient:", "", "", false, false},
+		{"r:patient::x", "", "", false, false},
+		{"r:patient", "", "", false, false},
+		{"r:patients:u1:x", "", "", false, false},
+		{"r:user:u1:x", "", "", false, false},
+		{"r", "", "", false, false},
+	}
+	for _, c := range cases {
+		root, head, closed, ok := headOf(c.in)
+		if root != c.root || head != c.head || closed != c.closed || ok != c.ok {
+			t.Errorf("headOf(%q) = %q %q %v %v, want %q %q %v %v", c.in, root, head, closed, ok, c.root, c.head, c.closed, c.ok)
+		}
+	}
+}
+
+// TestHeadIndexPrefixes: every prefix shape against a profile-scoped key set, with and without the
+// head index, agrees with the naive model and leaves every index consistent (D-037).
+func TestHeadIndexPrefixes(t *testing.T) {
+	keys := []string{
+		"vit:patient:u1", "vit:patient:u1:bp", "vit:patient:u1:bp:feed:1:2", "vit:patient:u10:bp",
+		"vit:patient:u2:bp", "vit:patient:", "vit:patient::x", "vit:patients:u1:bp", "vit:user:u1:record",
+		"vit", "inf:patient:u1:diaper", "inf:patient:u1", "user:t1:permissions", "patient:u1:x",
+	}
+	prefixes := []string{
+		"vit:patient:u1",         // exactly a head, no trailing ':' (the consumer's sweep): also u10
+		"vit:patient:u1:",        // head + ':'
+		"vit:patient:u1:bp",      // longer than the head
+		"vit:patient:u1:bp:feed", // longer still
+		"vit:patient:u",          // mid-head
+		"vit:patient:",           // empty uuid: root path
+		"vit:patient",            // mid second segment: root path
+		"vit:patient::",          // empty uuid closed: root path
+		"vit:user:u1",            // no patient segment
+		"vit:patient:nope",       // head absent
+		"inf:patient:u1",
+		"patient:u1",
+		"vi",
+	}
+	for _, mk := range []struct {
+		name string
+		new  func() *Store
+	}{{"heads", New}, {"no heads", NewWithoutHeadIndex}} {
+		for _, p := range prefixes {
+			t.Run(mk.name+"/"+p, func(t *testing.T) {
+				s, m := mk.new(), naive{}
+				for _, k := range keys {
+					s.Set(k, Entry{Value: val(k)})
+					m[k] = true
+				}
+				checkIndex(t, s)
+				got := s.DeletePrefix(p)
+				want := m.delete(func(k string) bool { return strings.HasPrefix(k, p) })
+				if got != want {
+					t.Fatalf("DeletePrefix(%q) = %d, want %d", p, got, want)
+				}
+				if !slices.Equal(keysOf(s), modelKeys(m)) {
+					t.Fatalf("left %v, want %v", keysOf(s), modelKeys(m))
+				}
+				checkIndex(t, s)
+			})
+		}
+	}
+}
+
+// TestHeadIndexLifecycle: the head index follows delete, expire, re-set and Replace.
+func TestHeadIndexLifecycle(t *testing.T) {
+	s := New()
+	s.Set("r:patient:a:v1", Entry{Value: val("1"), ExpiresAt: t0.Add(time.Minute)})
+	s.Set("r:patient:a:v2", Entry{Value: val("2")})
+	s.Set("r:patient:b:v1", Entry{Value: val("3")})
+	checkIndex(t, s)
+	if s.Set("r:patient:a:v2", Entry{Value: val("2b")}) {
+		t.Fatal("re-set reported new")
+	}
+	checkIndex(t, s)
+	if keys := s.Expire(t0.Add(time.Minute)); !slices.Equal(keys, []string{"r:patient:a:v1"}) {
+		t.Fatalf("Expire = %v", keys)
+	}
+	checkIndex(t, s)
+	if !s.Delete("r:patient:a:v2") {
+		t.Fatal("Delete missed")
+	}
+	checkIndex(t, s)
+	if _, ok := s.heads["r"]["r:patient:a"]; ok {
+		t.Fatal("emptied head bucket kept")
+	}
+	if got := s.DeletePrefix("r:patient:a"); got != 0 {
+		t.Fatalf("DeletePrefix after the head emptied = %d", got)
+	}
+	s.Replace(map[string]Entry{"q:patient:z:v": {Value: val("z")}})
+	checkIndex(t, s)
+	if _, ok := s.heads["r"]; ok {
+		t.Fatal("Replace kept the old head index")
+	}
+	if got := s.DeletePrefix("q:patient:z"); got != 1 {
+		t.Fatalf("head index not rebuilt by Replace: deleted %d", got)
+	}
+	s.Set("q:patient:z:v", Entry{Value: val("z")})
+	if got := s.DeletePrefix(""); got != 1 || s.heads == nil || len(s.heads) != 0 {
+		t.Fatalf("clear: deleted %d, heads %v", got, s.heads)
 	}
 }
 

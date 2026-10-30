@@ -51,7 +51,9 @@ You operate inside a continuous improvement loop. You do not solve problems in a
 | `internal/ws` | WebSocket upgrade, action routing | — |
 | `internal/replica` | Replica client, heartbeat, promotion | — |
 | `internal/persist` | PostgreSQL write-behind, hydration, TTL cleaner | — |
-| `internal/api` | HTTP management API (projects, keys, export/import) | — |
+| `internal/api` | HTTP management API: projects, keys, sheets, sessions, suspend/revoke, export | — |
+| `internal/session` | Per-node registry of authenticated connections (list, kick) | — |
+| `internal/tenant` | Admission + suspension state shared by `ws` and `api` | — |
 | `internal/config`, `internal/logger` | Config (env), slog logger | — |
 | `db/migration/` | golang-migrate SQL files for the cache database | — |
 | `doc/` | Scope, specs, decisions, protocol, persistence design, `reference/` (checked outside patterns) | — |

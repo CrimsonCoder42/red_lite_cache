@@ -66,7 +66,7 @@ it. This table is the acceptance list for S3 (reader) and S7 (migration).
 | R1 | met | `TestReconnectForever`, `TestDisconnectLoop`; `reader` `TestR1ReconnectForever` | the G-01-15 note; `/health` recovers by itself |
 | R2 | met (D-005) | `TestDisconnectLoop`; `reader` `TestR2DeletesQueuedAndReplayed`, `TestR2QueueOverflowCollapses` | DROPPED SWEEPS queue, `sweepPrefix` error path |
 | R3 | met | `TestDisconnectLoop`; `reader` `TestR3DisconnectedReadsMiss` | `linkReady()` gate |
-| R4 | met (D-008) | `TestKeyLoop`; `reader` `TestR4ExpiryAndBound` | the ADVO_CACHE §2 caveat |
+| R4 | met (D-008) | `TestKeyLoop`; `reader` `TestR4ExpiryAndBound`; leaks `TestL3ReaderBoundHoldsUnderChurn` (MaxEntries 1 000 held at every sample of 50 000 frames, heap +1.6 %) | the ADVO_CACHE §2 caveat |
 | R5 | met (D-003) | `TestKeyLoop` (invalidate{keys}); `internal/sheet` `TestRunJanitor` | "never rely on a TTL" caveat (§3) |
 | R6 | met (D-023) | `TestRaceLoop` (prefix, exact, suffix, two_misses_one_reader, stress) | the second sweep 2 s later (G-01-16) |
 | R7 | met | `internal/cache` `BenchmarkDeletePrefixIndexed` 313 µs vs naive 1740 µs at 100k keys (`doc/bootstrap_2026-10-29/bench_s1.txt`) | "sweep once per write" caveat (§4) |
@@ -84,6 +84,37 @@ it. This table is the acceptance list for S3 (reader) and S7 (migration).
 - The v1 wire format (`doc/protocol/wire.md`) still works against the old reader during the cut-over.
 - Every R-row above has an integration test in `testing/integration/` that fails on advo_cache's
   behaviour and passes here.
+
+### Status — consumer conformance 2026-10-29 (final, before S7)
+
+The R rows above re-proven at the consumer level, by a miniature of backendAdvo's own cache layer
+(`testing/conformance`, 3 readers = 3 instances, both admission modes, `60 | 60 | 0 | 0` under `-race`):
+R1/R3/R10 `TestC9BootWhileCacheDown`, `TestC8…` · R2 `TestC8DisconnectRetiresDroppedSweeps` · R4/R5
+`TestC7TTLBounds` · R6 `TestC2WriteInvalidatesEverywhere` (one sweep) + `TestC3ReadThroughRaceNeverRecaches`
+(200 iterations) · R7 `TestC4PrefixSweepScope` (93 real key shapes) + B1 on 10 526 corpus keys (miss sweep
+0.039×, profile sweep 0.44×, new key 1.43× — D-037) · R8 every `TestC*` through typed `Get` +
+`TestEdgeUndecodableValueIsMiss` · R9 `TestC3` (the refused Set is visible as `ErrStale`). Which
+backendAdvo lines each retires: `doc/consumer/backendadvo_migration.md`.
+
+## Admission and removal — how a project other than advomedix joins (D-024…D-031)
+
+- **Registration is admin-only.** `POST /admin/projects` with `REDLITE_ADMIN_KEY` creates a project
+  and returns one API key, shown once (sha256 at rest). The admin (or the project, with its key) then
+  creates its sheets. Nothing else creates a project; outside development nothing else creates a sheet
+  (autocreate is forced off, D-025).
+- **Admission.** In production (`REDLITE_ADMISSION=key`, the default there) `open` must carry the
+  project's `api_key` *and* the sheet password; any mismatch is one answer, `not authorized`. advomedix
+  cuts over with `REDLITE_ADMISSION=password` (v1 `open`, unchanged) until it sends a key.
+- **Sessions.** Every authenticated connection is a session — project, sheet, key, remote, connected_at,
+  last_seen, frames — listed by `GET /admin/sessions` across both nodes, audited on open/close/kick.
+- **Removal, three levels, immediate on every node:** kill one session (close 4003); suspend a project
+  (every session closed 4001, `open` refused, data kept, reversible with resume); revoke a project
+  (keys revoked, sheets dropped). Per key: issue another, revoke one (its sessions close 4002), rotate.
+  A reader treats 4001/4002/4003 as terminal and reports them through `LastError()`.
+- **Peers.** `/replica` and the fencing `/health` body require `REDLITE_CLUSTER_TOKEN`; production does
+  not start without it.
+
+The operator runbook (exact curl lines) is in `doc/release.md`.
 
 ## Out of scope (v1)
 

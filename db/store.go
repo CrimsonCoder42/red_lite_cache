@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/CrimsonCoder42/red_lite_cache/db/sqlc/audit"
 	"github.com/CrimsonCoder42/red_lite_cache/db/sqlc/cluster"
 	"github.com/CrimsonCoder42/red_lite_cache/db/sqlc/entries"
 	"github.com/CrimsonCoder42/red_lite_cache/db/sqlc/registry"
@@ -33,6 +34,7 @@ type Store struct {
 	Registry registry.Querier
 	Entries  entries.Querier
 	Cluster  cluster.Querier
+	Audit    audit.Querier
 }
 
 // NewStore builds a Store on pool.
@@ -42,6 +44,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 		Registry: registry.New(pool),
 		Entries:  entries.New(pool),
 		Cluster:  cluster.New(pool),
+		Audit:    audit.New(pool),
 	}
 }
 
@@ -61,6 +64,7 @@ func (s *Store) ExecTx(ctx context.Context, fn func(*Store) error) error {
 		Registry: registry.New(tx),
 		Entries:  entries.New(tx),
 		Cluster:  cluster.New(tx),
+		Audit:    audit.New(tx),
 	}
 	if err := fn(txStore); err != nil {
 		return err

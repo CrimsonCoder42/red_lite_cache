@@ -32,7 +32,7 @@ type Config struct {
 	CacheJanitorInterval time.Duration
 	CacheMaxKeysPerSheet int // 0 = unbounded
 
-	SheetAutocreate bool          // D-013: true = the first open creates the sheet (v1 behaviour)
+	SheetAutocreate bool          // D-013/D-025: the first open creates the sheet; default true only in development
 	BcryptCost      int           // sheet password hashing cost; tests lower it
 	SweepLogWindow  time.Duration // R6: how long an invalidation is remembered to refuse a stale set
 	SweepLogMax     int           // R6: at most this many invalidations remembered per sheet
@@ -66,7 +66,31 @@ type Config struct {
 	Election string
 
 	AdminKey string
+
+	// Admission is D-024: "password" (v1: sheet password only) or "key" (the project's api_key is
+	// required on open and must belong to the sheet's project; the password is still checked).
+	// Default "key" when Environment is production, "password" otherwise.
+	Admission string
+	// ClusterToken is D-031: the Bearer token /replica and the peer /health probe require (and a
+	// replica sends). Empty in production refuses to start; empty elsewhere logs one Warn.
+	ClusterToken string
+
+	// ── leak bounds + test clock (D-039, D-041) ──
+	// TenantMemoryMax is D-041: the cap on each of the tenant directory's revoked sheet names and
+	// revoked key ids (oldest dropped, one Warn on the first drop).
+	TenantMemoryMax int
+	// Clock is D-039's test seam: the time source of the sheet registry (store expiry, janitor,
+	// sweep log) and the lock manager. Never read from the environment; nil = time.Now. Only the
+	// test harness sets it (testing/integration WithClock).
+	Clock func() time.Time
+	// ── end leak bounds + test clock ──
 }
+
+// IsProduction reports REDLITE_ENVIRONMENT=production.
+func (c Config) IsProduction() bool { return c.Environment == "production" }
+
+// KeyAdmission reports REDLITE_ADMISSION=key (D-024).
+func (c Config) KeyAdmission() bool { return c.Admission == "key" }
 
 // IsReplica reports whether this instance follows a leader.
 func (c Config) IsReplica() bool { return c.Role == "replica" }
@@ -103,7 +127,7 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		CacheJitterPercent:     e.num("REDLITE_CACHE_JITTER_PERCENT", 20),
 		CacheJanitorInterval:   e.dur("REDLITE_CACHE_JANITOR_INTERVAL", time.Minute),
 		CacheMaxKeysPerSheet:   e.num("REDLITE_CACHE_MAX_KEYS_PER_SHEET", 0),
-		SheetAutocreate:        e.boolean("REDLITE_SHEET_AUTOCREATE", true),
+		SheetAutocreate:        e.boolean("REDLITE_SHEET_AUTOCREATE", e.str("REDLITE_ENVIRONMENT", "development") == "development"),
 		BcryptCost:             e.num("REDLITE_BCRYPT_COST", 10),
 		SweepLogWindow:         e.dur("REDLITE_SWEEP_LOG_WINDOW", 30*time.Second),
 		SweepLogMax:            e.num("REDLITE_SWEEP_LOG_MAX", 4096),
@@ -129,6 +153,9 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		ControlListen:          e.boolean("REDLITE_CONTROL_LISTEN", true),
 		Election:               e.str("REDLITE_ELECTION", "epoch"),
 		AdminKey:               e.str("REDLITE_ADMIN_KEY", ""),
+		Admission:              e.str("REDLITE_ADMISSION", defaultAdmission(e.str("REDLITE_ENVIRONMENT", "development"))),
+		ClusterToken:           e.str("REDLITE_CLUSTER_TOKEN", ""),
+		TenantMemoryMax:        e.num("REDLITE_TENANT_MEMORY_MAX", 10_000), // D-041
 	}
 	errs := e.errs
 	if c.Role != "leader" && c.Role != "replica" {
@@ -140,8 +167,22 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 	if c.PersistEnabled && c.PersistDatabaseURL == "" {
 		errs = append(errs, "REDLITE_PERSIST_DATABASE_URL is required when REDLITE_PERSIST_ENABLED=true")
 	}
+	if c.TenantMemoryMax < 1 { // D-041
+		errs = append(errs, "REDLITE_TENANT_MEMORY_MAX must be at least 1")
+	}
 	if c.ConnSendQueue < 1 || c.ReplicaSendQueue < 1 || c.PersistQueueSize < 1 {
 		errs = append(errs, "REDLITE_CONN_SEND_QUEUE, REDLITE_REPLICA_SEND_QUEUE and REDLITE_PERSIST_QUEUE_SIZE must be at least 1")
+	}
+	if c.Admission != "password" && c.Admission != "key" {
+		errs = append(errs, "REDLITE_ADMISSION must be password or key")
+	}
+	if c.IsProduction() && c.ClusterToken == "" {
+		errs = append(errs, "REDLITE_CLUSTER_TOKEN is required when REDLITE_ENVIRONMENT=production (D-031)")
+	}
+	if c.Environment != "development" && c.SheetAutocreate {
+		// D-025: autocreate is a development convenience; outside development it is ignored, not an
+		// error, so a staging .env copied from development cannot open the registry.
+		c.SheetAutocreate = false
 	}
 	if c.Election != "epoch" && c.Election != "advisory" {
 		errs = append(errs, "REDLITE_ELECTION must be epoch or advisory")
@@ -156,6 +197,14 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
 	return c, nil
+}
+
+// defaultAdmission is D-024's default: key in production, password (the v1 cut-over) elsewhere.
+func defaultAdmission(environment string) string {
+	if environment == "production" {
+		return "key"
+	}
+	return "password"
 }
 
 // TestDatabaseURL returns REDLITE_TEST_DATABASE_URL. Only tests call it, to decide whether persist

@@ -138,6 +138,20 @@ func (m *Manager) Len() int {
 	return len(m.locks)
 }
 
+// Stats is a point-in-time count of the manager's two maps (D-038 leak suite). Counts only: no
+// sheet, key or owner id leaves the package through it.
+type Stats struct {
+	Held   int // len(locks), expired ones included until cleanup
+	Owners int // len(byOwner): owners holding at least one lock
+}
+
+// Stats returns the current counts under one lock.
+func (m *Manager) Stats() Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return Stats{Held: len(m.locks), Owners: len(m.byOwner)}
+}
+
 // RunCleaner runs CleanupExpired every interval until ctx is done, then returns nil. The caller owns
 // the goroutine (app's errgroup).
 //

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -21,7 +22,9 @@ import (
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/lock"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/ws"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
@@ -35,7 +38,20 @@ type App struct {
 	node       ws.Node
 	ws         *ws.Handler
 	mux        *http.ServeMux
+
+	projects api.Store         // projects and keys: Postgres with persistence, else memory
+	tenants  *tenant.Directory // admission + suspension + revoked names (D-024, D-025, D-027)
+	sessions *session.Registry // this node's live sessions (D-026)
 }
+
+// Tenants is the admission directory every open consults.
+func (a *App) Tenants() *tenant.Directory { return a.tenants }
+
+// Sessions is this node's live-session registry.
+func (a *App) Sessions() *session.Registry { return a.sessions }
+
+// Projects is the project/key store (MemStore or DBStore).
+func (a *App) Projects() api.Store { return a.projects }
 
 // New builds an instance from cfg: registry, locks, the replica node, persistence (migrate, pool,
 // hydration of a leader before any listener exists), /ws, /replica, /health and /admin/*. ctx
@@ -62,8 +78,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 			BcryptCost:     cfg.BcryptCost,
 			SweepLogWindow: cfg.SweepLogWindow,
 			SweepLogMax:    cfg.SweepLogMax,
+			Now:            cfg.Clock, // nil = time.Now (D-039 test seam)
 		}),
-		locks: lock.NewManager(nil),
+		locks: lock.NewManager(cfg.Clock),
 		mux:   http.NewServeMux(),
 	}
 
@@ -76,7 +93,21 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 	// ── end replica + persist wiring ──
 
-	a.ws = ws.NewHandler(a.reg, a.locks, a.node, ws.Options{
+	// Tenancy (D-024…D-031): the project/key store, the admission directory and the session
+	// registry, built before /ws so the router can admit against them.
+	a.projects = api.NewMemStore()
+	if store := a.Store(); store != nil {
+		a.projects = api.NewDBStore(store)
+	}
+	a.tenants = tenant.New(a.projects, cfg.KeyAdmission())
+	a.tenants.SetMemoryMax(cfg.TenantMemoryMax) // D-041
+	a.sessions = session.NewRegistry(a.instanceID)
+	if cfg.ClusterToken == "" {
+		// production refuses to start without one (internal/config); elsewhere say it once.
+		logger.L.Warn("Replica: cluster token empty, /replica and peer /health unauthenticated", "environment", cfg.Environment)
+	}
+
+	a.ws = ws.NewHandler(a.reg, a.locks, a.node, a.tenants, a.sessions, a.Auditor(), ws.Options{
 		SendQueue:     cfg.ConnSendQueue,
 		MaxFrameBytes: cfg.MaxFrameBytes,
 		PingInterval:  cfg.PingInterval,
@@ -86,12 +117,12 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a.mux.HandleFunc("GET "+protocol.PathHealth, a.health)
 	a.mux.Handle(protocol.PathWS, a.ws)
 
-	// S6 management API: projects and keys in PostgreSQL when persistence is on, else in memory.
-	var projects api.Store = api.NewMemStore()
-	if store := a.Store(); store != nil {
-		projects = api.NewDBStore(store)
+	// S6 management API over the same project store.
+	admOpts, err := a.wireTenancy(ctx) // suspended set, last_used toucher, peer (wire_replica.go)
+	if err != nil {
+		return nil, err
 	}
-	adm := api.New(a.reg, projects, cfg.AdminKey, a.node.IsLeader)
+	adm := api.New(a.reg, a.projects, cfg.AdminKey, a.node.IsLeader, admOpts)
 	if wr := a.Writer(); wr != nil {
 		adm.OnRevoke(wr.RevokeProject) // queued ops of revoked sheets never reach Postgres
 	}
@@ -104,6 +135,9 @@ func (a *App) Handle(pattern string, h http.Handler) { a.mux.Handle(pattern, h) 
 
 // Registry is the instance's sheet registry (admin API, tests).
 func (a *App) Registry() *sheet.Registry { return a.reg }
+
+// Locks is the instance's lock manager (tests, /health stats).
+func (a *App) Locks() *lock.Manager { return a.locks }
 
 // Config is the config the instance was built from.
 func (a *App) Config() config.Config { return a.cfg }
@@ -122,9 +156,41 @@ func (a *App) role() string {
 }
 
 // health answers GET /health: a peer reads role and epoch to fence a stale leader (D-012).
-func (a *App) health(w http.ResponseWriter, _ *http.Request) {
+// health always answers 200 {"status":"ok"} (Docker HEALTHCHECK, load balancers). Role, epoch and
+// instance id — what a peer reads to fence a stale leader — are returned only to a caller with the
+// cluster token (D-031); with no token configured (development) everyone gets them.
+func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(protocol.Health{Status: "ok", Role: a.role(), Epoch: a.node.Epoch(), InstanceID: a.instanceID})
+	h := protocol.Health{Status: "ok"}
+	if tenant.CheckBearer(r, a.cfg.ClusterToken) {
+		h.Role, h.Epoch, h.InstanceID = a.role(), a.node.Epoch(), a.instanceID
+	}
+	if a.cfg.Environment == "development" && h.Role != "" {
+		h.Stats = a.Stats() // D-040: development only, and like role/epoch only to a cluster-token holder (D-031)
+	}
+	json.NewEncoder(w).Encode(h)
+}
+
+// QueuedFrames is the number of frames waiting in every client connection's send queue.
+func (a *App) QueuedFrames() int { return a.ws.QueuedFrames() }
+
+// Stats is this node's sizes (D-040): counts only, never keys or values. /health carries it in
+// development; the leak suite reads it.
+func (a *App) Stats() *protocol.HealthStats {
+	rs := a.reg.Stats()
+	ts := a.tenants.Stats()
+	st := &protocol.HealthStats{
+		Sheets: rs.Sheets, Collaborators: rs.Collaborators, Entries: rs.Store.Entries,
+		RootBuckets: rs.Store.RootBuckets, TailBuckets: rs.Store.TailBuckets, HeadBuckets: rs.Store.HeadBuckets,
+		SweepLogEntries: rs.SweepLogEntries, Conns: a.ws.Len(), Sessions: a.sessions.Len(),
+		LocksHeld: a.locks.Stats().Held, Suspended: ts.Suspended, RevokedNames: ts.RevokedNames, DeadKeys: ts.DeadKeys,
+		Goroutines: runtime.NumGoroutine(),
+	}
+	if wr := a.Writer(); wr != nil {
+		ps := wr.Stats()
+		st.PersistQueued, st.PersistParked, st.PersistHeld, st.PersistDropped = ps.Queued, ps.Parked, ps.Held, ps.Dropped
+	}
+	return st
 }
 
 // Run serves on ln until ctx is done, then shuts down: stop accepting, kick every client, wait for

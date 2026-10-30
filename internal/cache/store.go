@@ -9,26 +9,58 @@ import (
 // keySet is one bucket of the segment index.
 type keySet map[string]struct{}
 
+// patientSeg is the second segment that marks a profile-scoped key `<root>:patient:<uuid>[:…]`.
+const patientSeg = "patient"
+
 // Store is one sheet's key/value map. Get and Set are O(1). DeletePrefix and DeleteSuffix visit
 // only the keys that share the pattern's first (prefix) or last (suffix) ':'-separated segment, so
-// a sweep like `<root>:patient:<uuid>:` or `:permissions` never scans the whole sheet (R7).
+// a sweep like `<root>:patient:<uuid>:` or `:permissions` never scans the whole sheet (R7). A key
+// shaped `<root>:patient:<uuid>[:…]` is also indexed by its head `<root>:patient:<uuid>` (D-037),
+// so the consumer's profile sweep (domainPatientPrefix, no trailing ':') visits that root's head
+// names and the matching heads' keys instead of every key of the root.
 //
 // Bounded by the sheet's MaxKeys (enforced by internal/sheet) and by TTL expiry; the store itself
 // does not evict.
 //
 // after advo_cache/cache/cache.go:18-22: a sync.Map per sheet became map + RWMutex (D-002), the
-// value carries its own expiry instead of a goroutine per Set (K5, cache.go:44-51), and two segment
-// indexes replace the full Range in DeletePrefix/DeleteSuffix (cache.go:62-88).
+// value carries its own expiry instead of a goroutine per Set (K5, cache.go:44-51), and segment
+// indexes replace the full Range in DeletePrefix/DeleteSuffix (cache.go:62-88); D-037 adds the
+// patient-head index.
 type Store struct {
 	mu    sync.RWMutex
 	m     map[string]Entry
 	roots map[string]keySet // first segment (text before the first ':', or the whole key) → keys
 	tails map[string]keySet // last segment (text after the last ':', or the whole key) → keys
+	// heads: root → head `<root>:patient:<uuid>` → keys under that head. nil when the store was
+	// built by NewWithoutHeadIndex.
+	heads map[string]map[string]keySet
 }
 
-// New returns an empty store.
+// New returns an empty store with every index.
 func New() *Store {
-	return &Store{m: make(map[string]Entry), roots: make(map[string]keySet), tails: make(map[string]keySet)}
+	s := &Store{}
+	s.reset(true)
+	return s
+}
+
+// NewWithoutHeadIndex returns an empty store with only the first/last-segment index. It exists for
+// the D-037 benchmark (testing/conformance B1), which compares the two; production uses New.
+func NewWithoutHeadIndex() *Store {
+	s := &Store{}
+	s.reset(false)
+	return s
+}
+
+// reset empties the map and every index; withHeads turns the head index on. Caller holds mu for
+// writing or owns s exclusively.
+func (s *Store) reset(withHeads bool) {
+	s.m = make(map[string]Entry)
+	s.roots = make(map[string]keySet)
+	s.tails = make(map[string]keySet)
+	s.heads = nil
+	if withHeads {
+		s.heads = make(map[string]map[string]keySet)
+	}
 }
 
 // rootOf is the text before the first ':' (the whole string when there is none).
@@ -47,7 +79,26 @@ func tailOf(key string) string {
 	return key
 }
 
-// index adds a new key to both segment indexes. Caller holds mu for writing.
+// headOf splits a `<root>:patient:<uuid>[:…]` key or prefix into its root and its head
+// `<root>:patient:<uuid>`. closed reports that ':' follows the uuid (the uuid segment is complete).
+// ok is false for any other shape and for an empty uuid.
+func headOf(key string) (root, head string, closed, ok bool) {
+	i := strings.IndexByte(key, ':')
+	if i < 0 || !strings.HasPrefix(key[i+1:], patientSeg+":") {
+		return "", "", false, false
+	}
+	start := i + 1 + len(patientSeg) + 1
+	end := len(key)
+	if j := strings.IndexByte(key[start:], ':'); j >= 0 {
+		end, closed = start+j, true
+	}
+	if end == start {
+		return "", "", false, false
+	}
+	return key[:i], key[:end], closed, true
+}
+
+// index adds a new key to every index. Caller holds mu for writing.
 func (s *Store) index(key string) {
 	r := rootOf(key)
 	if s.roots[r] == nil {
@@ -59,12 +110,32 @@ func (s *Store) index(key string) {
 		s.tails[t] = make(keySet)
 	}
 	s.tails[t][key] = struct{}{}
+	if s.heads == nil {
+		return
+	}
+	if root, head, _, ok := headOf(key); ok {
+		hs := s.heads[root]
+		if hs == nil {
+			hs = make(map[string]keySet)
+			s.heads[root] = hs
+		}
+		if hs[head] == nil {
+			hs[head] = make(keySet)
+		}
+		hs[head][key] = struct{}{}
+	}
 }
 
-// remove deletes key from the map and both indexes, dropping an index bucket when it empties.
+// remove deletes key from the map and every index, dropping an index bucket when it empties. When
+// the last key goes, the maps are replaced by fresh ones: a Go map never shrinks on delete, so a
+// store drained key by key (expiry, sweeps) would otherwise keep its peak bucket arrays for life.
 // Caller holds mu for writing and knows key is present.
 func (s *Store) remove(key string) {
 	delete(s.m, key)
+	if len(s.m) == 0 {
+		s.reset(s.heads != nil)
+		return
+	}
 	r := rootOf(key)
 	if set := s.roots[r]; set != nil {
 		delete(set, key)
@@ -77,6 +148,24 @@ func (s *Store) remove(key string) {
 		delete(set, key)
 		if len(set) == 0 {
 			delete(s.tails, t)
+		}
+	}
+	if s.heads == nil {
+		return
+	}
+	root, head, _, ok := headOf(key)
+	if !ok {
+		return
+	}
+	if hs := s.heads[root]; hs != nil {
+		if set := hs[head]; set != nil {
+			delete(set, key)
+			if len(set) == 0 {
+				delete(hs, head)
+			}
+		}
+		if len(hs) == 0 {
+			delete(s.heads, root)
 		}
 	}
 }
@@ -125,9 +214,14 @@ func (s *Store) Delete(key string) bool {
 }
 
 // DeletePrefix removes every key starting with prefix and returns how many. "" removes every key.
-// A prefix containing ':' visits only the keys of its first segment; a prefix without ':' ends
-// inside the first segment, so it visits the index's root names and takes every key under each
-// matching root.
+//
+//   - `<root>:patient:<uuid>:…` (the uuid segment closed by ':') visits only that head's keys.
+//   - `<root>:patient:<uuid>` (ending inside or at the end of the uuid segment) visits that root's
+//     head names and takes every key under each head the prefix starts; every key it can match has
+//     a head, so nothing else is visited.
+//   - any other prefix containing ':' visits only the keys of its first segment.
+//   - a prefix without ':' ends inside the first segment: it visits the root names and takes every
+//     key under each matching root.
 func (s *Store) DeletePrefix(prefix string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -135,15 +229,31 @@ func (s *Store) DeletePrefix(prefix string) int {
 		return s.clear()
 	}
 	var victims []string
-	if i := strings.IndexByte(prefix, ':'); i >= 0 {
-		for k := range s.roots[prefix[:i]] {
+	root, head, closed, isHead := headOf(prefix)
+	switch {
+	case isHead && s.heads != nil && closed:
+		for k := range s.heads[root][head] {
 			if strings.HasPrefix(k, prefix) {
 				victims = append(victims, k)
 			}
 		}
-	} else {
-		for root, set := range s.roots {
-			if strings.HasPrefix(root, prefix) {
+	case isHead && s.heads != nil:
+		for h, set := range s.heads[root] {
+			if strings.HasPrefix(h, prefix) {
+				for k := range set {
+					victims = append(victims, k)
+				}
+			}
+		}
+	case strings.IndexByte(prefix, ':') >= 0:
+		for k := range s.roots[rootOf(prefix)] {
+			if strings.HasPrefix(k, prefix) {
+				victims = append(victims, k)
+			}
+		}
+	default:
+		for r, set := range s.roots {
+			if strings.HasPrefix(r, prefix) {
 				for k := range set {
 					victims = append(victims, k)
 				}
@@ -190,9 +300,7 @@ func (s *Store) DeleteSuffix(suffix string) int {
 // clear empties the store and returns how many keys it held. Caller holds mu for writing.
 func (s *Store) clear() int {
 	n := len(s.m)
-	s.m = make(map[string]Entry)
-	s.roots = make(map[string]keySet)
-	s.tails = make(map[string]keySet)
+	s.reset(s.heads != nil)
 	return n
 }
 
@@ -218,6 +326,27 @@ func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.m)
+}
+
+// Stats is a store's size: counts only, never keys or values (D-040). Diagnostic; the leak suite
+// (testing/leaks) asserts every field returns to 0 once the store is drained.
+type Stats struct {
+	Entries     int // stored entries, expired-but-unswept included
+	RootBuckets int // first-segment index buckets
+	TailBuckets int // last-segment index buckets
+	HeadBuckets int // patient-head buckets summed over every root (0 without the head index)
+	HeadRoots   int // roots holding at least one head bucket
+}
+
+// Stats counts the map and every index bucket under the read lock.
+func (s *Store) Stats() Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := Stats{Entries: len(s.m), RootBuckets: len(s.roots), TailBuckets: len(s.tails), HeadRoots: len(s.heads)}
+	for _, hs := range s.heads {
+		st.HeadBuckets += len(hs)
+	}
+	return st
 }
 
 // All returns a copy of every live entry at now (snapshot, sheet_state, export). Entry values share

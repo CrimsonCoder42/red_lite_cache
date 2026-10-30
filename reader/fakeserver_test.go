@@ -38,6 +38,8 @@ type fakeServer struct {
 	setTTLms int64         // expires_in_ms on a set ack
 	silent   bool          // read writes, never answer them
 	gate     chan struct{} // non-nil: delete* replies wait until it is closed
+	openErr  string        // non-empty: every open is refused with this error ...
+	openCode int           // ... then closed with this code (0 = dropped)
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -125,6 +127,15 @@ func (f *fakeServer) serve(ctx context.Context, c *websocket.Conn, req protocol.
 	switch req.Action {
 	case protocol.ActionOpen:
 		f.mu.Lock()
+		if f.openErr != "" {
+			e, code := f.openErr, f.openCode
+			f.mu.Unlock()
+			f.write(ctx, c, protocol.Response{ID: req.ID, Error: e})
+			if code != 0 {
+				_ = c.Close(websocket.StatusCode(code), e)
+			}
+			return false
+		}
 		if req.Password != f.password {
 			f.mu.Unlock()
 			f.write(ctx, c, protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword})
@@ -225,6 +236,19 @@ func (f *fakeServer) dropAll() {
 	f.mu.Unlock()
 	for _, c := range conns {
 		_ = c.CloseNow()
+	}
+}
+
+// closeAll closes every open connection with an application close code (D-030).
+func (f *fakeServer) closeAll(code int, reason string) {
+	f.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(f.conns))
+	for c := range f.conns {
+		conns = append(conns, c)
+	}
+	f.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close(websocket.StatusCode(code), reason)
 	}
 }
 

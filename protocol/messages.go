@@ -69,6 +69,11 @@ const (
 	ErrMsgUseReplicaPath   = "register_replica moved to " + PathReplica
 	ErrMsgDumpMoved        = "dump moved to GET /admin/sheets/{id}/export"
 	ErrMsgInternal         = "internal error"
+	// ErrMsgNotAuthorized is new (D-024): every admission refusal — missing key, a key of another
+	// project, a revoked key, an unknown sheet in key mode — answers this one string, so a client
+	// cannot tell which part was wrong (no oracle). The v1 "invalid password" stays in password mode.
+	ErrMsgNotAuthorized = "not authorized"
+	ErrMsgSuspended     = "suspended" // new (D-027): open of a suspended project; the socket closes 4001
 )
 
 // Request is every client → server frame, and the replica's register frame on PathReplica. It is a
@@ -103,6 +108,11 @@ type Request struct {
 	// key. The server refuses the set (ErrMsgStaleWrite) when an invalidation covering the key was
 	// applied after it. Absent = unconditional set (v1 behaviour). A pointer so 0 is expressible.
 	BaseSeq *uint64 `json:"base_seq,omitempty"`
+
+	// APIKey is new (D-024): on open, the project's API key. Required (and must belong to the
+	// sheet's project) when the server runs REDLITE_ADMISSION=key; ignored in password mode.
+	// Never logged (internal/logger masks api_key).
+	APIKey string `json:"api_key,omitempty"`
 
 	InstanceID string `json:"instance_id,omitempty"` // register_replica
 	StartedAt  string `json:"started_at,omitempty"`  // register_replica, RFC3339
@@ -215,10 +225,72 @@ type Envelope struct {
 
 // Health is the GET /health body. A peer reads Role and Epoch to fence a stale leader (D-012).
 type Health struct {
-	Status     string `json:"status"` // "ok"
-	Role       string `json:"role"`   // "leader" | "replica"
-	Epoch      uint64 `json:"epoch"`
-	InstanceID string `json:"instance_id"`
+	Status     string `json:"status"`         // "ok"
+	Role       string `json:"role,omitempty"` // "leader" | "replica"; omitted without the cluster token (D-031)
+	Epoch      uint64 `json:"epoch,omitempty"`
+	InstanceID string `json:"instance_id,omitempty"`
+	// Stats is D-040: this node's sizes, sent only when REDLITE_ENVIRONMENT=development (omitted
+	// everywhere else). Diagnostic; not part of the compatibility contract.
+	Stats *HealthStats `json:"stats,omitempty"`
+}
+
+// HealthStats is the development-only "stats" object of /health (D-040): counts only, never keys
+// or values. The leak suite (testing/leaks) and a developer read it; fields may be added.
+type HealthStats struct {
+	Sheets          int    `json:"sheets"`
+	Collaborators   int    `json:"collaborators"`
+	Entries         int    `json:"entries"`
+	RootBuckets     int    `json:"root_buckets"`
+	TailBuckets     int    `json:"tail_buckets"`
+	HeadBuckets     int    `json:"head_buckets"`
+	SweepLogEntries int    `json:"sweep_log_entries"`
+	Conns           int    `json:"conns"`
+	Sessions        int    `json:"sessions"`
+	LocksHeld       int    `json:"locks_held"`
+	Suspended       int    `json:"suspended"`
+	RevokedNames    int    `json:"revoked_names"`
+	DeadKeys        int    `json:"dead_keys"`
+	PersistQueued   int    `json:"persist_queued"`
+	PersistParked   int    `json:"persist_parked"`
+	PersistHeld     int    `json:"persist_held"`
+	PersistDropped  uint64 `json:"persist_dropped"`
+	Goroutines      int    `json:"goroutines"`
+}
+
+// Close codes (new, D-030): application codes in the 4000–4999 range RFC 6455 reserves for
+// applications. A reader treats each as terminal — no reconnect — and reports it via LastError.
+// Every other close (1000, 1001, 1006, network errors) keeps reconnect-forever (R1).
+const (
+	CloseSuspended  = 4001 // the project is suspended (D-027)
+	CloseKeyRevoked = 4002 // the API key this session was admitted with was revoked or rotated (D-028)
+	CloseKicked     = 4003 // an admin killed this session (D-030)
+)
+
+// Close reasons sent with the codes above.
+const (
+	CloseReasonSuspended  = "suspended"
+	CloseReasonKeyRevoked = "key revoked"
+	CloseReasonKicked     = "kicked by admin"
+)
+
+// Control frame types on the leader → replica stream (new, D-027/D-028/D-030): the tenancy changes
+// a replica must apply when persistence is off (with persistence on, NOTIFY redlite_control carries
+// them to every instance).
+const (
+	TypeProjectSuspended = "project_suspended"
+	TypeProjectResumed   = "project_resumed"
+	TypeKeyRevoked       = "key_revoked"
+	TypeSessionKill      = "session_kill"
+)
+
+// ReplicaControl is one tenancy control frame on the replica stream. Project, KeyID and Session
+// are identifiers (uuid strings) only — never a key, hash or password.
+type ReplicaControl struct {
+	Type    string `json:"type"`
+	Project string `json:"project,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
+	Session string `json:"session,omitempty"`
+	Epoch   uint64 `json:"epoch,omitempty"`
 }
 
 // Ptr returns a pointer to s, for Invalidate.Prefix/Suffix and ReplicaOp.Prefix/Suffix.

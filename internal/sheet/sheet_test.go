@@ -737,3 +737,60 @@ func TestDropRefusesHeldSheet(t *testing.T) {
 		t.Fatal("joined a dropped sheet")
 	}
 }
+
+// TestJanitorPrunesSweepLog: an idle sheet's sweep log empties (and frees its backing array) on the
+// janitor pass after the window — ExpireAll when active, PruneSweepLogs when not (replica) — with
+// no key expired by the inactive pass and the R6 floor still refusing an older base_seq.
+func TestJanitorPrunesSweepLog(t *testing.T) {
+	r, clk := newTestRegistry(t)
+	s := openSheet(t, r, "prune")
+	for i := range 10 {
+		s.Apply(nil, set(fmt.Sprintf("k%d", i), "v", 0), nil)
+	}
+	if n := r.Stats().SweepLogEntries; n != 10 {
+		t.Fatalf("sweep log %d, want 10", n)
+	}
+	base := s.Seq() - 1
+
+	// inactive (replica): one RunJanitor tick prunes the logs, expires nothing
+	clk.Advance(31 * time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- RunJanitor(ctx, r, time.Millisecond, func() bool { return false }) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for r.Stats().SweepLogEntries != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunJanitor = %v", err)
+	}
+	if n := r.Stats().SweepLogEntries; n != 0 {
+		t.Fatalf("inactive janitor left %d sweep-log entries", n)
+	}
+	if s.log.entries != nil {
+		t.Fatal("emptied sweep log kept its backing array")
+	}
+	if s.Len() != 10 {
+		t.Fatalf("inactive janitor touched keys: %d left, want 10", s.Len())
+	}
+	// R6: the pruned seqs raised the floor; a set based before them is refused
+	m := set("k0", "old", 0)
+	m.BaseSeq = ptr(base)
+	if res := s.Apply(nil, m, nil); !errors.Is(res.Err, ErrStaleWrite) {
+		t.Fatalf("set below the floor = %v, want ErrStaleWrite", res.Err)
+	}
+
+	// active: ExpireAll prunes too when no key expires
+	s.Apply(nil, set("k1", "v2", 0), nil)
+	clk.Advance(31 * time.Second)
+	if n := r.ExpireAll(clk.Now()); n != 0 {
+		t.Fatalf("ExpireAll expired %d, want 0", n)
+	}
+	if n := r.Stats().SweepLogEntries; n != 0 || s.log.entries != nil {
+		t.Fatalf("ExpireAll left %d sweep-log entries (nil=%v)", n, s.log.entries == nil)
+	}
+	if n := r.PruneSweepLogs(clk.Now()); n != 0 {
+		t.Fatalf("PruneSweepLogs on an empty log = %d", n)
+	}
+}

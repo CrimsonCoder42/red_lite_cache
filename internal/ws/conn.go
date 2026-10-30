@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 )
 
 // connSeq hands out process-unique connection ids (lock owner, sheet collaborator key, logs).
@@ -58,6 +59,10 @@ type Conn struct {
 	reason  string
 	done    chan struct{}
 	running atomic.Bool
+
+	// sess is the admitted session (D-026), set once by the router on open. The reader touches it
+	// per inbound frame and the writer counts per written frame: atomics only, no lock.
+	sess atomic.Pointer[session.Session]
 }
 
 // NewConn wraps an accepted or dialled socket. The caller sets the read limit on ws; Run starts
@@ -84,6 +89,9 @@ func (c *Conn) ID() uint64 { return c.id }
 
 // Remote is the peer address given in ConnOptions.
 func (c *Conn) Remote() string { return c.opts.Remote }
+
+// Queued is the number of frames waiting in the send queue (a count, for leak checks, D-038).
+func (c *Conn) Queued() int { return len(c.send) }
 
 // Done is closed when Run has returned and the socket is closed.
 func (c *Conn) Done() <-chan struct{} { return c.done }
@@ -115,16 +123,27 @@ func (c *Conn) SendAndClose(frame []byte, code websocket.StatusCode, reason stri
 	}
 }
 
-// Kick closes the connection with StatusGoingAway and reason, without blocking: the writer does
-// the close. Idempotent; safe under the sheet mutex. The peer resyncs on reconnect. After
-// SendAndClose it does nothing: the close is already queued behind the final frame, and kicking
-// would let the writer drop that frame (a step-down's KickAll racing a stale-epoch reply).
-func (c *Conn) Kick(reason string) {
+// Kick closes the connection with StatusGoingAway and reason (CloseWith). The peer resyncs on
+// reconnect.
+func (c *Conn) Kick(reason string) { c.CloseWith(websocket.StatusGoingAway, reason) }
+
+// CloseWith closes the connection with code and reason without blocking: the writer sends that
+// close frame to the peer (a reader sees 4001/4002/4003, D-030) and frames still queued are
+// dropped. Idempotent (the first close wins); safe under the sheet and session-registry locks; it
+// is the session's Kill func. After SendAndClose it does nothing: the close is already queued
+// behind the final frame, and closing now would let the writer drop that frame (a step-down's
+// KickAll or an admin kill racing a stale-epoch or refusal reply).
+func (c *Conn) CloseWith(code websocket.StatusCode, reason string) {
 	if c.final.Load() {
 		return
 	}
-	c.closeWith(websocket.StatusGoingAway, reason)
+	c.closeWith(code, reason)
 }
+
+// Session is the session this connection was admitted as, nil before a successful open.
+func (c *Conn) Session() *session.Session { return c.sess.Load() }
+
+func (c *Conn) bind(s *session.Session) { c.sess.Store(s) }
 
 func (c *Conn) closeWith(code websocket.StatusCode, reason string) {
 	c.once.Do(func() {
@@ -194,6 +213,9 @@ func (c *Conn) readLoop(handle func(frame []byte)) error {
 		if err != nil {
 			return fmt.Errorf("ws: conn %d: read: %w", c.id, err)
 		}
+		if s := c.sess.Load(); s != nil {
+			s.Touch(time.Now())
+		}
 		handle(data)
 	}
 }
@@ -218,6 +240,9 @@ func (c *Conn) writeLoop(ctx context.Context) {
 				c.log.Debug("WS: write failed", "err", err)
 				c.ws.CloseNow()
 				return
+			}
+			if s := c.sess.Load(); s != nil {
+				s.Sent()
 			}
 			if f.closeAfter {
 				c.ws.Close(f.code, f.reason)

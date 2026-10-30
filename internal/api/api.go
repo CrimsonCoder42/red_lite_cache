@@ -14,7 +14,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
@@ -32,15 +34,55 @@ type Server struct {
 	now      func() time.Time
 	leader   func() bool                                // writes are refused (503 not leader) on a replica: its registry is a mirror
 	onRevoke []func(project uuid.UUID, sheets []string) // revoke.go OnRevoke
+
+	tenants   *tenant.Directory
+	sessions  *session.Registry
+	auditor   tenant.Auditor
+	propagate func(protocol.ReplicaControl)
+	peer      *peer // nil = no peer to list or forward to
+}
+
+// Options are the tenancy dependencies of the API (D-026…D-030). Zero fields get a local default:
+// a password-mode Directory over the store, an empty session registry, NopAuditor, no propagation,
+// no peer.
+type Options struct {
+	Tenants  *tenant.Directory
+	Sessions *session.Registry
+	Auditor  tenant.Auditor
+	// Propagate carries a suspend/resume/key revoke/session kill to the other instances (NOTIFY
+	// redlite_control with persistence, the leader → replica stream without). Must not block long.
+	Propagate func(protocol.ReplicaControl)
+	// PeerURL is the other node's http(s)://host:port; GET /admin/sessions merges its sessions and
+	// DELETE /admin/sessions/{id} forwards there when the session is not on this node. "" = none.
+	PeerURL string
 }
 
 // New builds the API over the process registry and a project store. leader reports whether this
 // node is the leader; nil means always (a standalone test server).
-func New(reg *sheet.Registry, store Store, adminKey string, leader func() bool) *Server {
+func New(reg *sheet.Registry, store Store, adminKey string, leader func() bool, opts Options) *Server {
 	if leader == nil {
 		leader = func() bool { return true }
 	}
-	return &Server{reg: reg, store: store, adminKey: []byte(adminKey), now: time.Now, leader: leader}
+	if opts.Tenants == nil {
+		opts.Tenants = tenant.New(store, false)
+	}
+	if opts.Sessions == nil {
+		opts.Sessions = session.NewRegistry("")
+	}
+	if opts.Auditor == nil {
+		opts.Auditor = tenant.NopAuditor{}
+	}
+	if opts.Propagate == nil {
+		opts.Propagate = func(protocol.ReplicaControl) {}
+	}
+	s := &Server{
+		reg: reg, store: store, adminKey: []byte(adminKey), now: time.Now, leader: leader,
+		tenants: opts.Tenants, sessions: opts.Sessions, auditor: opts.Auditor, propagate: opts.Propagate,
+	}
+	if opts.PeerURL != "" {
+		s.peer = newPeer(opts.PeerURL, adminKey)
+	}
+	return s
 }
 
 // requireLeader answers 503 not leader on a replica: a project or sheet created there would live
@@ -61,12 +103,25 @@ func (s *Server) Register(mux interface {
 	mux.Handle("POST /admin/projects/{id}/sheets", http.HandlerFunc(s.createSheet))
 	mux.Handle("GET /admin/sheets/{id}/export", http.HandlerFunc(s.exportSheet))
 	mux.Handle("POST /admin/projects/{id}/revoke", http.HandlerFunc(s.revokeProject)) // revoke.go (D-021)
+	// tenancy.go (D-027, D-028, D-029)
+	mux.Handle("GET /admin/projects", http.HandlerFunc(s.listProjects))
+	mux.Handle("GET /admin/projects/{id}", http.HandlerFunc(s.getProject))
+	mux.Handle("POST /admin/projects/{id}/keys", http.HandlerFunc(s.issueKey))
+	mux.Handle("DELETE /admin/keys/{id}", http.HandlerFunc(s.revokeKey))
+	mux.Handle("POST /admin/keys/{id}/rotate", http.HandlerFunc(s.rotateKey))
+	mux.Handle("POST /admin/projects/{id}/suspend", http.HandlerFunc(s.suspendProject))
+	mux.Handle("POST /admin/projects/{id}/resume", http.HandlerFunc(s.resumeProject))
+	// sessions.go (D-026, D-030)
+	mux.Handle("GET /admin/sessions", http.HandlerFunc(s.listSessions))
+	mux.Handle("GET /admin/sheets/{name}/sessions", http.HandlerFunc(s.listSheetSessions))
+	mux.Handle("DELETE /admin/sessions/{id}", http.HandlerFunc(s.killSession))
 }
 
 // caller is who presented the bearer key.
 type caller struct {
 	admin   bool
 	project uuid.UUID // set for a project key
+	actor   string    // audit actor: "admin" or "key:<prefix>"
 }
 
 // authenticate resolves the bearer key: the admin key, or a project API key when allowProject.
@@ -76,7 +131,7 @@ func (s *Server) authenticate(r *http.Request, allowProject bool) (caller, bool)
 		return caller{}, false
 	}
 	if len(s.adminKey) > 0 && subtle.ConstantTimeCompare([]byte(key), s.adminKey) == 1 {
-		return caller{admin: true}, true
+		return caller{admin: true, actor: "admin"}, true
 	}
 	if !allowProject {
 		return caller{}, false
@@ -88,7 +143,7 @@ func (s *Server) authenticate(r *http.Request, allowProject bool) (caller, bool)
 		}
 		return caller{}, false
 	}
-	return caller{project: project}, true
+	return caller{project: project, actor: "key:" + key[:min(len(key), keyPrefixLen)]}, true
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +169,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := uuid.New()
-	key.ProjectID = id
+	key.ProjectID, key.Label = id, req.Label
 	if err := s.store.CreateProject(r.Context(), id, req.Name, key); err != nil {
 		if errors.Is(err, ErrConflict) {
 			s.fail(w, r, http.StatusConflict, "project name taken")
@@ -124,6 +179,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.audit(id, "project_created", id.String(), map[string]string{"key_id": key.ID.String(), "key_prefix": key.Prefix})
 	logger.L.Info("API: project created", "project", id.String(), "project_name", req.Name, "key_prefix", key.Prefix)
 	writeJSON(w, http.StatusCreated, protocol.CreateProjectResponse{
 		ProjectID: id.String(), Name: req.Name, APIKey: raw, KeyPrefix: key.Prefix,
@@ -174,6 +230,7 @@ func (s *Server) createSheet(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.auditAs(who.actor, project, "sheet_created", req.Name, map[string]string{"sheet": req.Name})
 	logger.L.Info("API: sheet created", "sheet", req.Name, "project", project.String())
 	writeJSON(w, http.StatusCreated, protocol.CreateSheetResponse{Sheet: req.Name, ProjectID: project.String()})
 }

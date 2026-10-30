@@ -151,12 +151,16 @@ func TestEdgeRouting(t *testing.T) {
 			keys = append(keys, k)
 		}
 		slices.Sort(keys)
-		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/json" || !slices.Equal(keys, []string{"epoch", "instance_id", "role", "status"}) {
+		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/json" || !slices.Equal(keys, []string{"epoch", "instance_id", "role", "stats", "status"}) { // stats: development only (D-040)
 			t.Fatalf("health: %d %q keys %v", resp.StatusCode, resp.Header.Get("Content-Type"), keys)
 		}
 		var h protocol.Health
 		raw, _ := json.Marshal(fields)
 		json.Unmarshal(raw, &h)
+		if h.Stats == nil {
+			t.Fatalf("health: development /health has no stats (D-040)")
+		}
+		h.Stats = nil
 		if h != (protocol.Health{Status: "ok", Role: "leader", Epoch: 1, InstanceID: srv.Cfg.InstanceID}) {
 			t.Fatalf("health = %+v", h)
 		}

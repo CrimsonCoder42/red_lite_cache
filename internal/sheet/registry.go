@@ -227,11 +227,49 @@ func (r *Registry) Len() int {
 	return len(r.sheets)
 }
 
+// Stats is the registry's size summed over every sheet: counts only (D-040). Sheets are never
+// evicted (D-013, D-042), so Sheets only grows by Create/Open/Restore and shrinks by Remove/Drop.
+type Stats struct {
+	Sheets          int
+	Collaborators   int
+	SweepLogEntries int
+	Store           cache.Stats // summed over every sheet
+}
+
+// Stats sums every sheet's collaborators, sweep-log entries and store counts. Each sheet is read
+// under its own mutex, one at a time, so the total is not one atomic snapshot of the registry.
+func (r *Registry) Stats() Stats {
+	sheets := r.Sheets()
+	st := Stats{Sheets: len(sheets)}
+	for _, s := range sheets {
+		c, l, ss := s.stats()
+		st.Collaborators += c
+		st.SweepLogEntries += l
+		st.Store.Entries += ss.Entries
+		st.Store.RootBuckets += ss.RootBuckets
+		st.Store.TailBuckets += ss.TailBuckets
+		st.Store.HeadBuckets += ss.HeadBuckets
+		st.Store.HeadRoots += ss.HeadRoots
+	}
+	return st
+}
+
 // ExpireAll runs one janitor pass over every sheet and returns how many keys expired.
 func (r *Registry) ExpireAll(now time.Time) int {
 	n := 0
 	for _, s := range r.Sheets() {
 		n += s.expire(now)
+	}
+	return n
+}
+
+// PruneSweepLogs prunes every sheet's sweep log at now without expiring any key and returns how
+// many entries it dropped. The janitor runs it on a replica, where ExpireAll is skipped (the replica
+// applies the leader's replicate_expire) but ApplyReplicated still fills the logs.
+func (r *Registry) PruneSweepLogs(now time.Time) int {
+	n := 0
+	for _, s := range r.Sheets() {
+		n += s.pruneLog(now)
 	}
 	return n
 }

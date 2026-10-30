@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -21,15 +22,32 @@ type Querier interface {
 	// Removes a revoked project's sheets (entries cascade) and returns their names so every instance
 	// can drop them from memory (D-021 control bus).
 	DeleteProjectSheets(ctx context.Context, projectID uuid.UUID) ([]string, error)
+	GetAPIKey(ctx context.Context, id uuid.UUID) (GetAPIKeyRow, error)
 	// Resolves a presented key (hashed by the caller) to its project; a revoked key is not found.
 	GetActiveAPIKeyByHash(ctx context.Context, keyHash []byte) (GetActiveAPIKeyByHashRow, error)
 	GetProject(ctx context.Context, id uuid.UUID) (Project, error)
 	GetSheet(ctx context.Context, arg GetSheetParams) (Sheet, error)
+	// GET /admin/projects/{id}: every key of the project (revoked included), never the hash.
+	ListProjectKeys(ctx context.Context, projectID uuid.UUID) ([]ListProjectKeysRow, error)
 	ListProjectSheets(ctx context.Context, projectID uuid.UUID) ([]Sheet, error)
+	// GET /admin/projects: keyset page on (created_at, id), with live key and sheet counts.
+	ListProjectsPage(ctx context.Context, arg ListProjectsPageParams) ([]ListProjectsPageRow, error)
 	// Hydration: every sheet, with its hash, before the listener starts.
 	ListSheets(ctx context.Context) ([]Sheet, error)
+	// Boot and reconcile: the projects whose sessions must be refused.
+	ListSuspendedProjects(ctx context.Context) ([]uuid.UUID, error)
+	// DELETE /admin/keys/{id} and the old half of rotate: returns the project, or no row when the key
+	// does not exist or was already revoked.
+	RevokeAPIKey(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	// Revokes every live key of a project (POST /admin/projects/{id}/revoke).
 	RevokeProjectKeys(ctx context.Context, projectID uuid.UUID) (int64, error)
+	// ================================
+	// TENANCY (000002: D-027 suspend, D-028 keys, D-029 listing)
+	// ================================
+	// Suspends (suspended = true) or resumes a project; returns the stored suspended_at (NULL on resume).
+	SetProjectSuspended(ctx context.Context, arg SetProjectSuspendedParams) (pgtype.Timestamptz, error)
+	// Admission: at most one write a minute per key (D-028), never per frame.
+	TouchAPIKeyUsed(ctx context.Context, id uuid.UUID) error
 	// Created by the admin API or by an autocreating open (project 'default'). A repeat keeps the
 	// original project and replaces the hash only when the name already belongs to the same project.
 	UpsertSheet(ctx context.Context, arg UpsertSheetParams) error

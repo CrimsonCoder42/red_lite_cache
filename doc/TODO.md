@@ -13,3 +13,6 @@
 - R6 under write load: the sweep log holds 4096 entries per sheet; above ~136 writes/s on one sheet the floor passes a 30 s read-through's base and sets are refused (never stale) — raise `REDLITE_SWEEP_LOG_MAX` or bound the stale scan to entries newer than the base (review finding 5).
 - Sheet names are global: project B learns a name exists from a 409 (review finding 10). Namespacing names per project is an R11 follow-up.
 - Audit log (D-019): proposed `000002_audit` pair in `doc/bootstrap_2026-10-29/000002_audit.proposed.sql`, waiting on the migration checkpoint.
+- Tenancy: replicate projects and keys over the stream when persistence is off (today a promoted replica in key mode admits nobody); reconcile key revokes on the cleaner tick (a missed NOTIFY + stream frame leaves the other node's sessions on that key open).
+- Tenancy: a reader whose key was revoked while it was disconnected retries `not authorized` forever (no 4002 reaches it) — consider making a refused open after a successful one terminal.
+- Tenancy: run the key lookup for unknown sheets too (or a constant-time delay) so open latency does not reveal which sheet names exist; carry the suspended set in the replica snapshot when persistence is off.

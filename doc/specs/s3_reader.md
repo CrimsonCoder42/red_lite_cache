@@ -46,16 +46,26 @@ sweep and double JSON pass (`doc/purpose.md` "What success looks like").
     `ErrClosed` and reads miss. Cancelling `Config.Context` is `Close`.
 11. **Dependencies** — `reader/` imports only the standard library, `protocol/` and `github.com/coder/websocket`; no
     globals, no `init`, no environment reads.
+12. **D-030 terminal closes** (tenancy 2026-10-29) — a server close with 4001 / 4002 / 4003 (during the open, the
+    replay or later) stops the reader for good: no reconnect, the reader enters the closed state (writes return
+    `ErrClosed`, reads miss, `Close` stays idempotent), `IsConnected` false, and `LastError()` returns `ErrSuspended` /
+    `ErrAdmitted` (key revoked) / `ErrKicked` — the sentinel itself — within 1 s. An open refused `suspended` is
+    terminal too: `New` returns `ErrSuspended`. Warn `Reader: closed by server` with addr and code. 1000 / 1001 / 1006
+    and network errors keep reconnect-forever (criterion 1); `LastError` stays nil.
+13. **D-024 admission** — `Config.APIKey` is sent as `api_key` on every open (omitted when empty) and never logged. An
+    open refused `not authorized` is today's auth failure: `New` returns `ErrAuthFailed`; once the reader is running,
+    a later refusal is **not** terminal — it keeps retrying with backoff (the operator may restore the key), and
+    `LastError` stays nil.
 
 ## Surface
 
 | Kind | Name | Package |
 |---|---|---|
-| var | `ErrNotConnected`, `ErrClosed`, `ErrAuthFailed`, `ErrStale`, `ErrTimeout` | reader |
+| var | `ErrNotConnected`, `ErrClosed`, `ErrAuthFailed`, `ErrStale`, `ErrTimeout`, `ErrSuspended`, `ErrAdmitted`, `ErrKicked` (new, D-030) | reader |
 | const | `DefaultConnectTimeout`, `DefaultWriteTimeout`, `DefaultMaxEntries`, `DefaultMaxPendingDeletes`, `DefaultReconnectMin`, `DefaultReconnectMax`, `DefaultMissWindow` | reader |
-| type | `Config{LeaderAddr, BackupAddr, Sheet, Password, Context, Logger, ConnectTimeout, WriteTimeout, MaxEntries, MaxPendingDeletes, ReconnectMin, ReconnectMax, MissWindow}` | reader |
+| type | `Config{LeaderAddr, BackupAddr, Sheet, Password, APIKey (new, D-024), Context, Logger, ConnectTimeout, WriteTimeout, MaxEntries, MaxPendingDeletes, ReconnectMin, ReconnectMax, MissWindow}` | reader |
 | func | `New(Config) (*Reader, error)` | reader |
-| method | `Get(key, target) bool`, `GetRaw(key) (any, bool)`, `Has`, `IsNull`, `Set`, `SetWithTTL`, `Delete`, `DeletePrefix`, `DeleteSuffix`, `IsConnected`, `Close` | reader |
+| method | `Get(key, target) bool`, `GetRaw(key) (any, bool)`, `Has`, `IsNull`, `Set`, `SetWithTTL`, `Delete`, `DeletePrefix`, `DeleteSuffix`, `IsConnected`, `LastError` (new, D-030), `Close` | reader |
 | frames sent | `open`, `set`, `delete`, `delete_prefix`, `delete_suffix` | protocol.Request |
 | frames read | open/write replies (`protocol.Response`, matched by `id`), `sheet_state`, `replicate`, `invalidate` | protocol |
 
@@ -64,6 +74,8 @@ sweep and double JSON pass (`doc/purpose.md` "What success looks like").
 | Value | Source (field / config / computed from) | Decided |
 |---|---|---|
 | `open.sheet`, `open.password` | `Config.Sheet`, `Config.Password` | ✅ |
+| `open.api_key` | `Config.APIKey`; "" omitted (D-024) | ✅ |
+| `LastError` | the close code of the session's last read (4001→`ErrSuspended`, 4002→`ErrAdmitted`, 4003→`ErrKicked`) or an open reply `suspended` (D-030) | ✅ |
 | `open.version` | `protocol.Version` (D-010) | ✅ |
 | `epoch` on open and every write | highest `Response.Epoch` seen on an open reply (D-012); 0 omitted | ✅ |
 | `id` on every request | per-reader counter, `atomic.Uint64` | ✅ |
@@ -81,7 +93,8 @@ sweep and double JSON pass (`doc/purpose.md` "What success looks like").
 | Failure | What the caller sees | What the system does |
 |---|---|---|
 | Socket down | reads miss; `IsConnected` false; `Set` → `ErrNotConnected`; `Delete*` → nil | reconnects forever; deletes applied locally and queued |
-| Sheet not open / open refused | same as socket down; `New` → `ErrAuthFailed` only for `invalid password` | that address counts as failed; alternate |
+| Sheet not open / open refused | same as socket down; `New` → `ErrAuthFailed` for `invalid password` or `not authorized` | that address counts as failed; alternate; keeps retrying with backoff |
+| Terminal close 4001/4002/4003, or open refused `suspended` | `LastError` = `ErrSuspended`/`ErrAdmitted`/`ErrKicked`; `IsConnected` false; writes → `ErrClosed`; `New` → `ErrSuspended` on a suspended first open | reader closes itself, never reconnects; Warn `Reader: closed by server` |
 | Lock held | n/a (locks not in the reader surface; 0 call sites in backendAdvo) | — |
 | Persist unavailable | n/a (server side) | — |
 | Replica lag / stale leader | a replica's `not leader`/`stale epoch` reply: `Set` → `ErrNotConnected`, delete requeued | link reset, fail over; lower epoch on open refused |
@@ -99,12 +112,12 @@ writes, so the reader's `wmu` exists only to keep request ids in wire order for 
 ## Decisions
 
 D-002 (map + RWMutex), D-004 (reconnect forever), D-005 (queue + replay), D-008 (TTL + bound), D-010 (version on
-open), D-011 (coder/websocket), D-012 (epoch).
+open), D-011 (coder/websocket), D-012 (epoch), D-024 (api_key on open), D-030 (terminal close codes).
 
 ## Wire compatibility
 
 Additive only; nothing in the v1 compatibility list changes. What this reader sends that a **v1 server ignores**:
-`id`, `version`, `epoch` (open and writes), `base_seq` (set). Against a v1 server: replies carry no `id`, so the reader
+`id`, `version`, `epoch` (open and writes), `base_seq` (set), `api_key` (open, only when set). Against a v1 server: replies carry no `id`, so the reader
 matches a reply without one to its oldest pending request (a v1 server answers in order); acks carry no `seq` or
 `expires_in_ms`, so values have no local expiry and base_seq stays at the sheet_state's 0. Fields it reads that a v1
 server never sends (`seq`, `epoch`, `expires_in_ms`, `keys`) are optional and default to "none". A v1 `invalidate`
@@ -117,7 +130,8 @@ helpers with 0 call sites in backendAdvo), singleflight in the reader (the consu
 
 ## Tests
 
-All in `reader/reader_test.go` (line 1 `// Covers: reader`), against `reader/fakeserver_test.go`.
+Unit tests in `reader/reader_test.go` and `reader/terminal_test.go` (line 1 `// Covers: reader`), against
+`reader/fakeserver_test.go`; the real-server half of 12 in `testing/integration/terminal_test.go`.
 
 | Criterion | Test | Kind |
 |---|---|---|
@@ -132,3 +146,5 @@ All in `reader/reader_test.go` (line 1 `// Covers: reader`), against `reader/fak
 | 9 D-012 | `TestEpochRefusedFailsOver` | unit |
 | 10 lifecycle | `TestCloseIdempotentNoLeak`, `TestContextCancelCloses`, `TestBroadcastsApplied` | unit |
 | 11 deps | `go list -deps ./reader` (report) | check |
+| 12 D-030 | `TestTerminalCloseCodes`, `TestNonTerminalCloseReconnects`, `TestOpenSuspendedTerminal` (unit); `TestTerminalCloseReader`, `TestTerminalNonTerminalKickReconnects`, `TestTerminalOpenSuspended` (integration) | unit + integration |
+| 13 D-024 | `TestOpenNotAuthorized`, `TestNoAPIKeyOmitted` | unit |
