@@ -9,12 +9,12 @@ import (
 	"slices"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
-// readLimit is the largest frame the reader accepts: a sheet_state carries the whole sheet.
+// readLimit is the largest message the reader accepts: a state chunk is ~1 MiB, but one entry may
+// be larger.
 const readLimit = 64 << 20
 
 // errLinkLost is delivered to a request whose connection died before its reply arrived.
@@ -39,7 +39,11 @@ func terminalClose(err error) *serverClose {
 	if err == nil {
 		return nil
 	}
-	switch code := websocket.CloseStatus(err); code {
+	code, _, ok := rpcwire.CloseCode(err) // the stream status's ErrorDetail close_code
+	if !ok {
+		return nil
+	}
+	switch code {
 	case protocol.CloseSuspended:
 		return &serverClose{code: int(code), sentinel: ErrSuspended}
 	case protocol.CloseKeyRevoked:
@@ -115,7 +119,7 @@ type result struct {
 // session is one live connection. pending and dead are guarded by Reader.cmu.
 type session struct {
 	addr   string
-	conn   *websocket.Conn
+	conn   link
 	ctx    context.Context
 	cancel context.CancelFunc
 	// wmu makes id assignment and the write one step, so request ids reach the wire in order. A v1
@@ -248,7 +252,7 @@ func (r *Reader) connect(addr string, reconnect bool) (bool, error) {
 		sess.cancel()
 	}
 	<-done
-	_ = sess.conn.CloseNow()
+	sess.conn.closeNow()
 	if sc := terminalClose(sess.readErr); sc != nil {
 		return connected, sc
 	}
@@ -269,32 +273,29 @@ func (r *Reader) connect(addr string, reconnect bool) (bool, error) {
 func (r *Reader) handshake(addr string) (*session, error) {
 	hctx, hcancel := context.WithTimeout(r.ctx, r.cfg.ConnectTimeout)
 	defer hcancel()
-	conn, _, err := websocket.Dial(hctx, addr, nil)
+	conn, err := r.dial(hctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("reader: dial %s: %w", addr, err)
 	}
-	conn.SetReadLimit(readLimit)
 	fail := func(err error) (*session, error) {
-		_ = conn.CloseNow()
+		conn.closeNow()
 		return nil, err
 	}
 
 	seen := r.epoch.Load()
-	open, err := json.Marshal(protocol.Request{
+	open := protocol.Request{
 		Action: protocol.ActionOpen, ID: r.nextID.Add(1), Version: protocol.Version, Epoch: seen,
 		Sheet: r.cfg.Sheet, Password: r.cfg.Password, APIKey: r.cfg.APIKey,
-	})
-	if err != nil {
-		return fail(fmt.Errorf("reader: encode open: %w", err))
 	}
-	if err := conn.Write(hctx, websocket.MessageText, open); err != nil {
+	if err := conn.write(hctx, open); err != nil {
 		return fail(fmt.Errorf("reader: open %s: %w", addr, err))
 	}
 
 	// The open reply is the first frame without "type"; anything typed before it is ignored.
 	var reply protocol.Response
 	for {
-		data, env, err := readFrame(hctx, conn)
+		f, err := conn.read(hctx)
+		data, env := f.data, f.env
 		if sc := terminalClose(err); sc != nil {
 			return fail(sc)
 		}
@@ -332,21 +333,24 @@ func (r *Reader) handshake(addr string) (*session, error) {
 	}
 
 	for {
-		data, env, err := readFrame(hctx, conn)
+		f, err := conn.read(hctx)
 		if sc := terminalClose(err); sc != nil {
 			return fail(sc)
 		}
 		if err != nil {
 			return fail(fmt.Errorf("reader: open %s: await sheet_state: %w", addr, err))
 		}
-		if env.Type != protocol.TypeSheetState {
+		if f.env.Type != protocol.TypeSheetState {
 			continue
 		}
-		var st protocol.SheetState
-		if err := json.Unmarshal(data, &st); err != nil {
-			return fail(fmt.Errorf("reader: open %s: decode sheet_state: %w", addr, err))
+		st := f.st // gRPC: assembled from its chunks
+		if st == nil {
+			st = new(protocol.SheetState)
+			if err := json.Unmarshal(f.data, st); err != nil {
+				return fail(fmt.Errorf("reader: open %s: decode sheet_state: %w", addr, err))
+			}
 		}
-		r.local.replace(st, r.now())
+		r.local.replace(*st, r.now())
 		break
 	}
 
@@ -359,18 +363,6 @@ func (r *Reader) handshake(addr string) (*session, error) {
 	r.sess = sess
 	r.cmu.Unlock()
 	return sess, nil
-}
-
-func readFrame(ctx context.Context, conn *websocket.Conn) ([]byte, protocol.Envelope, error) {
-	var env protocol.Envelope
-	_, data, err := conn.Read(ctx)
-	if err != nil {
-		return nil, env, err
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, env, fmt.Errorf("decode frame: %w", err)
-	}
-	return data, env, nil
 }
 
 // replay sends every queued delete, in order, and waits for each ack; deletes queued meanwhile are
@@ -403,25 +395,40 @@ func (r *Reader) replay(sess *session) (int, error) {
 		r.queue = nil
 		r.cmu.Unlock()
 		// The ops are pending now: if the link dies, teardown puts them back at the queue's front.
-		for _, c := range calls {
-			if err := r.write(sess, c); err != nil {
-				sess.wmu.unlock()
-				return total, err
+		// They go out replayWindow at a time, each window acked before the next: a long queue
+		// pipelined at once can outrun the server's writer, fill this connection's send queue
+		// with its own replies and get it kicked — then requeued and replayed again, forever.
+		for i := 0; i < len(calls); i += replayWindow {
+			win := calls[i:min(i+replayWindow, len(calls))]
+			if i > 0 {
+				if err := sess.wmu.lock(sess.ctx); err != nil {
+					return total, errLinkLost
+				}
 			}
-		}
-		sess.wmu.unlock()
-		for _, c := range calls {
-			resp, err := r.await(r.ctx, c)
-			if err != nil {
-				return total, fmt.Errorf("reader: replay %s %q: %w", c.op.action(), c.op.arg, err)
+			for _, c := range win {
+				if err := r.write(sess, c); err != nil {
+					sess.wmu.unlock()
+					return total, err
+				}
 			}
-			if !resp.Success {
-				return total, fmt.Errorf("reader: replay %s %q: server: %s", c.op.action(), c.op.arg, resp.Error)
+			sess.wmu.unlock()
+			for _, c := range win {
+				resp, err := r.await(r.ctx, c)
+				if err != nil {
+					return total, fmt.Errorf("reader: replay %s %q: %w", c.op.action(), c.op.arg, err)
+				}
+				if !resp.Success {
+					return total, fmt.Errorf("reader: replay %s %q: server: %s", c.op.action(), c.op.arg, resp.Error)
+				}
+				total++
 			}
-			total++
 		}
 	}
 }
+
+// replayWindow bounds the unacked deletes a replay has in flight: well under the server's
+// per-connection send queue (REDLITE_CONN_SEND_QUEUE, default 256).
+const replayWindow = 64
 
 // errQueued: the delete went to the replay queue instead of the wire.
 var errQueued = errors.New("reader: queued")
@@ -470,15 +477,10 @@ func (r *Reader) send(o op, queueIfDown bool) (*call, error) {
 
 // write puts c on the wire; the caller holds sess.wmu. A failure cancels the session.
 func (r *Reader) write(sess *session, c *call) error {
-	data, err := json.Marshal(c.op.request(c.id, r.epoch.Load()))
-	if err != nil {
-		sess.cancel()
-		return fmt.Errorf("reader: encode %s: %w", c.op.action(), err)
-	}
-	// Never the caller's ctx: coder/websocket closes the connection when a write's ctx ends.
+	// Never the caller's ctx: a link closes the connection when a write's ctx ends.
 	wctx, cancel := context.WithTimeout(sess.ctx, r.cfg.WriteTimeout)
 	defer cancel()
-	if err := sess.conn.Write(wctx, websocket.MessageText, data); err != nil {
+	if err := sess.conn.write(wctx, c.op.request(c.id, r.epoch.Load())); err != nil {
 		sess.cancel()
 		return fmt.Errorf("reader: write %s: %w", c.op.action(), err)
 	}
@@ -536,17 +538,22 @@ func (r *Reader) readLoop(sess *session) {
 	defer sess.cancel()
 	defer func() {
 		if p := recover(); p != nil {
+			r.panics.Add(1) // Stats().Panics: the count a test can assert on, not only this log line
 			r.log.Error("Reader: panic recovered", "addr", sess.addr, "panic", p)
 			sess.readErr = fmt.Errorf("reader: panic: %v", p)
 		}
 	}()
 	for {
-		data, env, err := readFrame(sess.ctx, sess.conn)
+		f, err := sess.conn.read(sess.ctx)
 		if err != nil {
 			sess.readErr = err
 			return
 		}
-		if !r.dispatch(sess, env, data) {
+		if f.st != nil { // gRPC: a re-sent sheet state, already assembled
+			r.local.replace(*f.st, r.now())
+			continue
+		}
+		if !r.dispatch(sess, f.env, f.data) {
 			return
 		}
 	}

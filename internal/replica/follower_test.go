@@ -4,13 +4,21 @@ package replica
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	"github.com/CrimsonCoder42/red_lite_cache/internal/rpc"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	pb "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 func testReplicaNode(t *testing.T, onControl func(protocol.ReplicaControl)) *Node {
@@ -70,43 +78,58 @@ func TestFollowerControlFrames(t *testing.T) {
 	}
 }
 
-// D-031: /replica refuses before the upgrade (401, no hub entry) without the token; the peer
-// probe sends it.
+// D-031: Replica/Follow and Replica/Probe refuse a missing or wrong cluster token (UNAUTHENTICATED,
+// no hub entry); the peer prober sends it as call credentials.
 func TestClusterTokenRefusalAndProbeHeader(t *testing.T) {
 	n, err := New(t.Context(), sheet.NewRegistry(sheet.Options{}), Options{
 		Role: RoleLeader, HeartbeatInterval: 100 * time.Millisecond, HeartbeatTimeout: time.Second,
-		ClusterToken: "tok",
+		ClusterToken: "tok", InstanceID: "leader-1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, auth := range []string{"", "Bearer nope"} {
-		req := httptest.NewRequest(http.MethodGet, protocol.PathReplica, nil)
-		req.Header.Set("Connection", "Upgrade")
-		req.Header.Set("Upgrade", "websocket")
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
-		rec := httptest.NewRecorder()
-		n.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("auth %q: status %d, want 401", auth, rec.Code)
-		}
-	}
-
-	var seen string
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = r.Header.Get("Authorization")
-		_ = json.NewEncoder(w).Encode(protocol.Health{Status: "ok", Role: RoleLeader, Epoch: 1})
-	}))
-	defer peer.Close()
-	if _, err := probe(t.Context(), peer.Client(), peer.URL+protocol.PathHealth, "tok"); err != nil {
+	srv, _ := rpc.NewServer(rpc.ServerOptions{ClusterToken: "tok", MaxRecvBytes: 1 << 20, KeepaliveTime: time.Minute, KeepaliveWait: time.Second})
+	pb.RegisterReplicaServer(srv, n.ReplicaService())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if seen != "Bearer tok" {
-		t.Fatalf("probe Authorization = %q, want %q", seen, "Bearer tok")
+	go srv.Serve(ln)
+	t.Cleanup(srv.Stop)
+	cc, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if h := bearer(""); h != nil {
-		t.Fatalf("bearer(\"\") = %v, want nil", h)
+	t.Cleanup(func() { cc.Close() })
+	client := pb.NewReplicaClient(cc)
+
+	for _, auth := range []string{"", "Bearer nope", "tok"} {
+		ctx := t.Context()
+		if auth != "" {
+			ctx = metadata.AppendToOutgoingContext(ctx, rpcwire.AuthHeader, auth)
+		}
+		f, err := client.Follow(ctx)
+		if err == nil {
+			_, err = f.Recv()
+		}
+		if status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("Follow with %q: %v, want UNAUTHENTICATED", auth, err)
+		}
+		if _, err := client.Probe(ctx, &pb.ProbeRequest{}); status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("Probe with %q: %v, want UNAUTHENTICATED", auth, err)
+		}
+	}
+	if n.hub.len() != 0 {
+		t.Fatalf("%d replicas registered without the token", n.hub.len())
+	}
+
+	probe, closeFn, err := n.grpcProber(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+	h, err := probe(t.Context())
+	if err != nil || h.Role != RoleLeader || h.Epoch != 1 || h.InstanceID != "leader-1" {
+		t.Fatalf("probe with the token = %+v, %v", h, err)
 	}
 }

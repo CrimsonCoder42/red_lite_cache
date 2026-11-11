@@ -21,7 +21,10 @@ sweep and double JSON pass (`doc/purpose.md` "What success looks like").
    WriteTimeout, link lost) is requeued and the link is reset.
 3. **R3** — While disconnected `Get`, `GetRaw`, `Has`, `IsNull` miss although the local map still holds the key.
 4. **R4** — A key misses after the `expires_in_ms` it arrived with (sheet_state, replicate, set ack), measured from
-   receipt; the local map never exceeds MaxEntries (a new key on a full map evicts an expired entry, else an arbitrary one).
+   receipt; the local map never exceeds MaxEntries (a new key on a full map draws 5 entries uniformly and evicts the
+   first expired one, else the least recently read — D-043; reads under 100 ms apart count as one). A prefix or suffix
+   delete, the reader's own or a broadcast one, visits only the index buckets it can match (`cache.Index`, the
+   server store's index), so its cost follows the matches, not the map.
 5. **R6** — A set carries `base_seq`: the applied seq at this reader's OLDEST live miss of the key, else the current
    applied seq (a write-through with no read). Per key the reader keeps the earliest miss of each `MissWindow/2` slice;
    an entry is live for `MissWindow` (default 30s, should match the server's `REDLITE_SWEEP_LOG_WINDOW`). A later miss
@@ -44,8 +47,9 @@ sweep and double JSON pass (`doc/purpose.md` "What success looks like").
    and the reader moves to the other address. Every write and open carries `epoch`; `version` rides on `open`.
 10. **Lifecycle** — `Close` is idempotent, waits for every goroutine (none leak), and afterwards writes return
     `ErrClosed` and reads miss. Cancelling `Config.Context` is `Close`.
-11. **Dependencies** — `reader/` imports only the standard library, `protocol/` and `github.com/coder/websocket`; no
-    globals, no `init`, no environment reads.
+11. **Dependencies** — `reader/` imports only the standard library, `protocol/`, `internal/cache` (the shared key
+    index, itself standard-library only; 2026-11-10) and `github.com/coder/websocket`; no globals, no `init`, no
+    environment reads.
 12. **D-030 terminal closes** (tenancy 2026-10-29) — a server close with 4001 / 4002 / 4003 (during the open, the
     replay or later) stops the reader for good: no reconnect, the reader enters the closed state (writes return
     `ErrClosed`, reads miss, `Close` stays idempotent), `IsConnected` false, and `LastError()` returns `ErrSuspended` /
@@ -112,7 +116,8 @@ writes, so the reader's `wmu` exists only to keep request ids in wire order for 
 ## Decisions
 
 D-002 (map + RWMutex), D-004 (reconnect forever), D-005 (queue + replay), D-008 (TTL + bound), D-010 (version on
-open), D-011 (coder/websocket), D-012 (epoch), D-024 (api_key on open), D-030 (terminal close codes).
+open), D-011 (coder/websocket), D-012 (epoch), D-024 (api_key on open), D-030 (terminal close codes), D-043 (sampled
+LRU eviction).
 
 ## Wire compatibility
 
@@ -138,7 +143,7 @@ Unit tests in `reader/reader_test.go` and `reader/terminal_test.go` (line 1 `// 
 | 1 R1 | `TestR1ReconnectForever` | unit (fake server) |
 | 2 R2 | `TestR2DeletesQueuedAndReplayed`, `TestR2QueueOverflowCollapses`, `TestDeleteConnectedAcked` | unit |
 | 3 R3 | `TestR3DisconnectedReadsMiss` | unit |
-| 4 R4 | `TestR4ExpiryAndBound` | unit |
+| 4 R4 | `TestR4ExpiryAndBound`, `TestEvictionKeepsHotKeys`, `TestEvictionSample` (D-043), `TestLocalIndexMatchesScan`, `TestLocalIndexDrainsToZero` (unit); `TestL13ReaderIndexDrains` (leaks) | unit + leaks |
 | 5 R6 | `TestR6BaseSeq`, `TestR6MissWindowReplaces` (unit); `TestRaceLoop` (integration) | unit + integration |
 | 6 R8 | `TestR8TypedIsolatedGet` | unit |
 | 7 R9 | `TestR9AckedSet` | unit |

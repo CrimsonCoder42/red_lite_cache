@@ -1,0 +1,139 @@
+// red_lite_cache wire contract, leader → replica (doc/specs/s10_grpc.md, D-048). Field numbers are
+// permanent.
+syntax = "proto3";
+
+package redlite.v1;
+
+import "redlite/v1/cache.proto";
+
+option go_package = "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1;redlitev1";
+
+// Replica is the leader's replication service, served on the leader's client port. A replica calls
+// Follow with call metadata `authorization: Bearer <REDLITE_CLUSTER_TOKEN>` (D-031: a wrong or
+// missing token ends the call with Unauthenticated before any data), sends one Register, and then
+// receives: RegisterReply, the snapshot (SnapshotSheet chunks per sheet, then SnapshotEnd), and the
+// live stream (ops, sheet creates, heartbeats, tenancy control), in the leader's apply order.
+service Replica {
+  rpc Follow(stream ReplicaClientMsg) returns (stream ReplicaServerMsg);
+  // Probe answers a peer's fencing check (D-012, D-031: cluster token required): this node's role
+  // and epoch. A leader that sees a peer with a higher epoch steps down.
+  rpc Probe(ProbeRequest) returns (ProbeReply);
+}
+
+// ProbeRequest asks a node for its role and epoch.
+message ProbeRequest {}
+
+// ProbeReply is a node's role ("leader" | "replica"), epoch and instance id.
+message ProbeReply {
+  string role = 1;
+  uint64 epoch = 2;
+  string instance_id = 3;
+}
+
+// ReplicaClientMsg is what a replica sends: one Register.
+message ReplicaClientMsg {
+  oneof body {
+    Register register = 1;
+  }
+}
+
+// Register announces the replica. A replica whose epoch is higher than the leader's makes the
+// leader verify its peer (and step down if fenced, D-012).
+message Register {
+  string instance_id = 1;
+  string started_at = 2; // RFC 3339
+  uint64 epoch = 3;
+}
+
+// ReplicaServerMsg is every leader → replica message.
+message ReplicaServerMsg {
+  oneof body {
+    RegisterReply register_reply = 1;
+    SnapshotSheet snapshot_sheet = 2;
+    SnapshotEnd snapshot_end = 3;
+    Heartbeat heartbeat = 4;
+    ReplicaSheet replicate_sheet = 5;
+    Replicate replicate = 6;
+    ReplicaOp op = 7;
+    ReplicaControl control = 8;
+  }
+}
+
+// RegisterReply answers Register. A refusal ("not leader", "stale epoch", "instance_id required")
+// is followed by the end of the stream.
+message RegisterReply {
+  bool success = 1;
+  string error = 2;
+  uint64 epoch = 3;
+}
+
+// SnapshotSheet is one chunk of one sheet of the join snapshot (K6). Entries are sorted by key;
+// last = true on the sheet's final chunk, when the replica replaces the sheet. The password hash
+// travels so a promoted replica authenticates exactly as the leader did (K12).
+message SnapshotSheet {
+  string sheet = 1;
+  bytes password_hash = 2;
+  string project_id = 3;
+  repeated Entry entries = 4;
+  uint64 seq = 5;
+  uint64 epoch = 6;
+  bool last = 7;
+}
+
+// SnapshotEnd closes the snapshot; everything after it is the live stream.
+message SnapshotEnd {
+  int64 sheets = 1;
+  uint64 epoch = 2;
+}
+
+// Heartbeat is sent every REDLITE_HEARTBEAT_INTERVAL.
+message Heartbeat {
+  uint64 epoch = 1;
+  string instance_id = 2;
+}
+
+// ReplicaSheet announces a sheet created on the leader (no data).
+message ReplicaSheet {
+  string sheet = 1;
+  bytes password_hash = 2;
+  string project_id = 3;
+  uint64 seq = 4;
+  uint64 epoch = 5;
+}
+
+// ReplicaOp is a delete-shaped op of one sheet.
+message ReplicaOp {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    DELETE = 1;
+    DELETE_PREFIX = 2;
+    DELETE_SUFFIX = 3;
+    EXPIRE = 4; // janitor expiry: keys
+  }
+  Kind kind = 1;
+  string sheet = 2;
+  uint64 seq = 3;
+  uint64 epoch = 4;
+  oneof target {
+    string key = 5;
+    KeyList keys = 6;
+    string prefix = 7;
+    string suffix = 8;
+  }
+}
+
+// ReplicaControl is one tenancy change a replica applies (D-027, D-028, D-030). Identifiers only.
+message ReplicaControl {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    PROJECT_SUSPENDED = 1;
+    PROJECT_RESUMED = 2;
+    KEY_REVOKED = 3; // without key_id: every key of the project
+    SESSION_KILL = 4;
+  }
+  Kind kind = 1;
+  string project = 2;
+  string key_id = 3;
+  string session = 4;
+  uint64 epoch = 5;
+}

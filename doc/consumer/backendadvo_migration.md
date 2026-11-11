@@ -7,6 +7,13 @@ here; every line cited was read). Every behaviour claim names a conformance test
 conformance alone `60 | 60 | 0 | 0`; every C test runs 3 readers on one sheet (= the three API
 instances) in **both** admission modes (`/password` = cut-over, `/key_C13` = target)._
 
+> **2026-11-11, wire change (D-048):** the cache now speaks gRPC; JSON over WebSocket is gone. Nothing
+> in the plan below changes except addresses: `CACHE_LEADER_ADDR` / `CACHE_BACKUP_ADDR` become
+> `host:port` (step 1's import swap to `reader/v1compat` already moves backendAdvo off the advo_cache
+> reader, which can no longer connect). The cache's admin API moved to port 8097 (`doc/release.md`).
+> Evidence counts quoted below are from 2026-10-29; the current harness is
+> `doc/grpc_build_2026-11-11/out/harness_after_removal.txt`.
+
 ## 1. Workaround → evidence
 
 | backendAdvo workaround | Lines | Conformance evidence | Verdict |
@@ -35,8 +42,8 @@ the price of dropping the second sweep, never a stale read.
 
 | backendAdvo (`util/config.go:19-24`) | red_lite_cache |
 |---|---|
-| `CACHE_LEADER_ADDR` | `reader.Config.LeaderAddr` (`ws://<leader>:8095/ws`) |
-| `CACHE_BACKUP_ADDR` | `reader.Config.BackupAddr` (`ws://<replica>:8096/ws`) |
+| `CACHE_LEADER_ADDR` | `reader.Config.LeaderAddr` (`<leader>:8095` — gRPC since D-048; a `ws://` URL is refused) |
+| `CACHE_BACKUP_ADDR` | `reader.Config.BackupAddr` (`<replica>:8096`) |
 | `CACHE_SHEET` | `reader.Config.Sheet` |
 | `CACHE_PASSWORD` | `reader.Config.Password` |
 | — (step 4, optional) | `reader.Config.APIKey` once the cache runs `REDLITE_ADMISSION=key` |
@@ -45,7 +52,8 @@ On the **cache nodes**: `REDLITE_ENVIRONMENT=production`, `REDLITE_ADMISSION=pas
 backendAdvo sends today; `TestC*/password`), `REDLITE_SHEET_AUTOCREATE` is forced off in production —
 so **create the sheet first** (`doc/release.md` runbook: register a project, create `patient-access`
 with the existing password), the same `REDLITE_CLUSTER_TOKEN` on leader and replica, `REDLITE_ADMIN_KEY`,
-`REDLITE_PEER_ADDRESS` on both. Ports 8095/8096 (advo_cache keeps 8081/8082 during the cut-over).
+`REDLITE_PEER_ADDRESS` (`<other node>:<its client port>`) on both. Ports 8095/8096 gRPC and 8097/8098
+admin (advo_cache keeps 8081/8082 during the cut-over).
 
 ## 3. Cut-over, in order — each step ships and rolls back alone
 

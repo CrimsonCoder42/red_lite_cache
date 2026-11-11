@@ -5,9 +5,6 @@ package integration
 // StartLeader / StartReplica live in harness_server.go.
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,10 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
-	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
 // Timeout bounds every wait in a test so a hang fails instead of stalling the suite.
@@ -47,127 +41,6 @@ func TestDatabaseURL(t testing.TB) string {
 		t.Skip(SkipPersist)
 	}
 	return u
-}
-
-// RawConn is a frame-level client for edge-case tests: it sends protocol.Request frames and reads
-// whatever the server sends, with no reader logic in between.
-type RawConn struct {
-	t    testing.TB
-	Conn *websocket.Conn
-}
-
-// Dial opens a raw WebSocket to wsURL (ws://host:port/ws) and closes it at cleanup.
-func Dial(t testing.TB, wsURL string) *RawConn {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-	c, _, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial %s: %v", wsURL, err)
-	}
-	c.SetReadLimit(64 << 20)
-	t.Cleanup(func() { c.CloseNow() })
-	return &RawConn{t: t, Conn: c}
-}
-
-// Send writes req as one text frame.
-func (r *RawConn) Send(req protocol.Request) {
-	r.t.Helper()
-	b, err := json.Marshal(req)
-	if err != nil {
-		r.t.Fatalf("marshal: %v", err)
-	}
-	r.SendBytes(b)
-}
-
-// SendBytes writes b as one text frame, unvalidated (malformed JSON, oversized frames).
-func (r *RawConn) SendBytes(b []byte) {
-	r.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-	if err := r.Conn.Write(ctx, websocket.MessageText, b); err != nil {
-		r.t.Fatalf("write: %v", err)
-	}
-}
-
-// Next reads the next frame, failing the test after Timeout.
-func (r *RawConn) Next() []byte {
-	r.t.Helper()
-	b, err := r.TryNext(Timeout)
-	if err != nil {
-		r.t.Fatalf("read: %v", err)
-	}
-	return b
-}
-
-// TryNext reads the next frame or returns the error (a closed socket, or a timeout after d).
-func (r *RawConn) TryNext(d time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	defer cancel()
-	_, b, err := r.Conn.Read(ctx)
-	return b, err
-}
-
-// Reply reads frames until one without "type" (a direct reply) and decodes it. Broadcasts read on
-// the way are returned too, in order.
-func (r *RawConn) Reply() (protocol.Response, [][]byte) {
-	r.t.Helper()
-	var skipped [][]byte
-	for {
-		b := r.Next()
-		var env protocol.Envelope
-		if err := json.Unmarshal(b, &env); err != nil {
-			r.t.Fatalf("decode %s: %v", b, err)
-		}
-		if env.Type != "" {
-			skipped = append(skipped, b)
-			continue
-		}
-		var resp protocol.Response
-		if err := json.Unmarshal(b, &resp); err != nil {
-			r.t.Fatalf("decode reply %s: %v", b, err)
-		}
-		return resp, skipped
-	}
-}
-
-// Do sends req and returns its reply.
-func (r *RawConn) Do(req protocol.Request) protocol.Response {
-	r.t.Helper()
-	r.Send(req)
-	resp, _ := r.Reply()
-	return resp
-}
-
-// Open sends open and returns the reply and the sheet_state frame that follows a success.
-func (r *RawConn) Open(sheet, password string) (protocol.Response, protocol.SheetState) {
-	r.t.Helper()
-	resp := r.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: sheet, Password: password})
-	var st protocol.SheetState
-	if !resp.Success {
-		return resp, st
-	}
-	if err := json.Unmarshal(r.Next(), &st); err != nil || st.Type != protocol.TypeSheetState {
-		r.t.Fatalf("expected sheet_state after open, got %+v (err %v)", st, err)
-	}
-	return resp, st
-}
-
-// ExpectClosed fails unless the server closes the socket within d.
-func (r *RawConn) ExpectClosed(d time.Duration) {
-	r.t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		_, err := r.TryNext(time.Until(deadline))
-		if err == nil {
-			continue // drain frames sent before the close
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			break
-		}
-		return
-	}
-	r.t.Fatalf("socket still open after %s", d)
 }
 
 // Proxy is a TCP forwarder in front of a server. Cut drops every live connection (the DISCONNECT

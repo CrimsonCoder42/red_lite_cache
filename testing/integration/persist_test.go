@@ -118,7 +118,7 @@ func TestPersistLoop(t *testing.T) {
 	if e := second.App.Node().Epoch(); e != 1 {
 		t.Fatalf("epoch after restart = %d, want 1", e)
 	}
-	if resp, _ := Dial(t, second.WSURL).Open(name, "wrong"); resp.Error != protocol.ErrMsgInvalidPassword {
+	if resp, _ := Dial(t, second.ClientAddr).Open(name, "wrong"); resp.Error != protocol.ErrMsgInvalidPassword {
 		t.Fatalf("wrong password after restart = %+v", resp)
 	}
 	r2 := NewReader(t, second, name)

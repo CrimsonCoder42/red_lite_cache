@@ -1,124 +1,112 @@
-# Wire protocol — v1 (with additive changes)
+# Wire protocol — gRPC (redlite.v1)
 
-_Code: `protocol/messages.go` is the source of truth; this file describes it. v1 columns are transcribed
-from `advomedix-v2/advo_cache/README.md` and `ws/handler.go` (2026-10-29) and are the compatibility
-contract every change is measured against. `protocol.Version` is still 1: every change below is additive._
+_Contract: `proto/redlite/v1/cache.proto` and `replica.proto` are the source of truth; generated Go
+code is in `protocol/redlitev1` (`make proto`; `protocol/redlitev1/stale_test.go` fails when it is
+stale). This file describes them. The JSON-over-WebSocket wire (v1, `/ws`, `/replica`) was retired
+on 2026-11-11 (D-048); its frame table is kept at the end for the record._
 
-All frames are JSON text over WebSocket. Clients speak at `/ws`; a replica speaks to its leader at
-`/replica` (D-010). Client → server frames carry `action`; server → client broadcasts carry `type`; a
-direct reply to a request carries neither and has `success`. A client tells a reply from a broadcast
-by the presence of `type`, and matches a reply to its request by `id` when it sent one.
+## Ports
 
-Every request may carry `id` (echoed in the reply) and `epoch` (the highest leader epoch the sender has
-seen; a server with a lower epoch refuses with `stale epoch`, D-012).
+| port | serves |
+|---|---|
+| `REDLITE_PORT` (`:8095` leader, `:8096` replica) | gRPC: `redlite.v1.Cache`, `redlite.v1.Replica`, `grpc.health.v1.Health` |
+| `REDLITE_ADMIN_PORT` (`:8097`) | HTTP: `GET /health`, `/admin/*` (doc/specs/s6_api.md) |
 
-## Client → server (actions, `/ws`)
+Plaintext gRPC (h2c); TLS is terminated in front, as before.
 
-| action | v1 fields | new fields | reply |
-|---|---|---|---|
-| `open` | `sheet`, `password` | `version` (absent = 1), `api_key` (D-024) | `{success, sheet, protocol_version, epoch, seq}` then a `sheet_state` frame. **Password mode** (`REDLITE_ADMISSION=password`, v1): wrong password → `{success:false,error:"invalid password"}` and the socket closes; unknown sheet without autocreate → `sheet not found`. **Key mode** (`key`, the production default): unknown sheet, wrong password, missing key, another project's key or a revoked key → one answer `{success:false,error:"not authorized"}` and the socket closes (no oracle). Either mode: a suspended project → `suspended`, close **4001**. A replica that has not promoted → `not leader` |
-| `get` | `key` | — | `{success, key, value}` or `{success:false, error:"key not found"}` |
-| `set` | `key`, `value`, `ttl?` (MINUTES, int; 0/absent = `REDLITE_CACHE_TTL`), `jitter?` (accepted, ignored: jitter is server policy) | `base_seq?` (R6) | `{success, key, seq, expires_in_ms}`; broadcasts `replicate`. Refused: `stale write` (base_seq older than a covering write) or `sheet full` |
-| `set_null` | `key` | — | `{success, key, seq, expires_in_ms}`; stores `"__NULL__"`, broadcasts `replicate` |
-| `delete` | `key` | — | `{success, key, deleted, seq}`; broadcasts `invalidate{key}` |
-| `delete_prefix` | `prefix` (`""` = every key) | — | `{success, deleted, seq}`; broadcasts `invalidate{prefix}` |
-| `delete_suffix` | `suffix` | — | `{success, deleted, seq}`; broadcasts `invalidate{suffix}` |
-| `dump` | — | — | `{success:false, error:"dump moved to GET /admin/sheets/{id}/export"}` — the O(n) dump left the client socket |
-| `lock` | `key`, `lock_ttl?` (SECONDS) | — | `{success, key}` or `{success:false, error:"lock held by another client", key}` |
-| `unlock` | `key` | — | `{success, key}` or `{success:false, error:"not lock owner"}` / `"lock not found"` |
-| `register_replica` | `instance_id`, `started_at` | — | on `/ws`: `{success:false, error:"register_replica moved to /replica"}` |
+## Cache.Session — one bidi stream per client session
 
-Every action except `open` is rejected with `must open sheet first` until a sheet is open. Malformed
-JSON → `invalid JSON`; an unknown action → `unknown action`; a frame over `REDLITE_MAX_FRAME_BYTES`
-closes the socket (status 1009).
+`rpc Session(stream ClientMsg) returns (stream ServerMsg)`. Requests, their replies and the
+sheet's broadcasts travel on the one stream **in one order** (R2, R6): a reply is never overtaken by
+a broadcast of a later write, nor the reverse. Every message names its sheet.
 
-## Server → client (broadcasts, sender excluded)
+**Admission.** API key mode: call metadata `authorization: Bearer <api key>` (D-024); a malformed
+`authorization` ends the call `UNAUTHENTICATED` before any session exists. Password mode (v1
+admission): no metadata, the password in `Open`.
 
-| type | v1 fields | new fields |
+**ClientMsg** `{id, epoch, oneof body}` — `id` is echoed on the reply's ServerMsg; `epoch` is the
+highest leader epoch the client has seen (a server with a lower epoch refuses `stale epoch`, D-012).
+
+| body | fields | Reply |
 |---|---|---|
-| `sheet_state` | `data` (object: key → value) | `expires_in_ms` (key → remaining ms; absent key = no expiry), `seq`, `epoch` |
-| `replicate` | `key`, `value` | `seq`, `expires_in_ms` |
-| `invalidate` | one of `key`, `prefix`, `suffix` | `keys` (array: keys expired in one janitor pass, D-003), `seq`. `prefix`/`suffix` are emitted even when `""` |
+| `open` | `sheet`, `password`, `version` | `{success, sheet, protocol_version, epoch, seq}`, then the sheet's state as `StateChunk`s. Refusals as before: `invalid password` / `not authorized` (then the stream ends `UNAUTHENTICATED`), `suspended` (ends 4001), `sheet not found`, `not leader` |
+| `get` | `sheet`, `key` | `{success, key, value}` or `key not found` |
+| `set` | `sheet`, `key`, `value` (bytes: the JSON value, stored as given), `ttl_minutes`, `base_seq?` (R6) | `{success, key, seq, expires_in_ms}`; broadcasts `Replicate`. Refused: `stale write`, `sheet full` |
+| `set_null` | `sheet`, `key`, `ttl_minutes` | as `set`; stores `"__NULL__"` |
+| `delete` | `sheet`, `key` | `{success, key, deleted, seq}`; broadcasts `Invalidate{key}` |
+| `delete_prefix` | `sheet`, `prefix` (`""` = every key) | `{success, deleted, seq}`; broadcasts `Invalidate{prefix}` |
+| `delete_suffix` | `sheet`, `suffix` | `{success, deleted, seq}`; broadcasts `Invalidate{suffix}` |
+| `lock` | `sheet`, `key`, `lock_ttl_seconds` | `{success, key}` or `lock held by another client` |
+| `unlock` | `sheet`, `key` | `{success, key}` or `not lock owner` / `lock not found` |
+| (empty / unknown body) | — | `unknown action` (or `must open sheet first`); the stream stays up |
 
-`seq` is the sheet's sequence number after the write; it increases by one per applied write or
-expiry pass, in the order every collaborator receives them (D-014).
+Every body except `open` is refused `must open sheet first` until a sheet is open. A message over
+`REDLITE_MAX_FRAME_BYTES` ends the stream `RESOURCE_EXHAUSTED`. `dump` has no message: it moved to
+`GET /admin/sheets/{id}/export`.
 
-## Leader → replica (`/replica`)
+**ServerMsg** `{id, oneof body}`:
 
-The replica sends `register_replica{instance_id, started_at, epoch}`. The leader replies
-`{success, epoch}` (or refuses and steps down when the replica's epoch is higher, D-012), then:
-
-| type | fields |
+| body | fields |
 |---|---|
-| `snapshot_sheet` | `sheet`, `password_hash` (bcrypt, base64), `project_id`, `data`, `expires_in_ms`, `seq`, `epoch` — one frame per sheet (K6) |
-| `snapshot_end` | `sheets` (count), `epoch` — everything after it is the live stream |
-| `heartbeat` | `epoch`, `instance_id` |
-| `replicate_sheet` | `sheet`, `password_hash`, `project_id`, `seq`, `epoch` — a sheet was created |
-| `replicate` | `sheet`, `key`, `value`, `seq`, `epoch`, `expires_in_ms` |
-| `replicate_delete` | `sheet`, `key`, `seq`, `epoch` |
-| `replicate_delete_prefix` | `sheet`, `prefix`, `seq`, `epoch` |
-| `replicate_delete_suffix` | `sheet`, `suffix`, `seq`, `epoch` |
-| `replicate_expire` | `sheet`, `keys`, `seq`, `epoch` |
-| `project_suspended` / `project_resumed` | `project`, `epoch` — tenancy control (D-027). Always sent on the stream; with persistence the same change also goes by NOTIFY `redlite_control` (NOTIFY is not durable). Applying twice is harmless |
-| `key_revoked` | `project`, `key_id`, `epoch` (D-028); without `key_id` = a project revoke: every session of the project closes 4002 |
-| `session_kill` | `session`, `epoch` (D-030) — understood by replicas but not sent today: a kill reaches the peer by `DELETE /admin/sessions/{id}` over HTTP |
+| `reply` | `success, error, sheet, key, value, deleted, count, protocol_version, epoch, seq, expires_in_ms` |
+| `state` (`StateChunk`) | `sheet, seq, epoch, entries[{key, value, expires_in_ms}], chunk, last` — sorted by key, at most 1 MiB per chunk (no message near 4 MB at any sheet size); the reader bulk-builds when `last` arrives |
+| `replicate` | `sheet, key, value, seq, expires_in_ms` |
+| `invalidate` | `sheet, seq`, one of `key`, `keys` (an expiry pass), `prefix`, `suffix` (`""` = whole sheet) |
 
-`/replica` requires `Authorization: Bearer <REDLITE_CLUSTER_TOKEN>` (D-031): without it the leader
-answers HTTP 401 before the upgrade and sends nothing.
+## Replica.Follow and Replica.Probe
 
-## Close codes (new, D-030)
+`rpc Follow(stream ReplicaClientMsg) returns (stream ReplicaServerMsg)` and
+`rpc Probe(ProbeRequest) returns (ProbeReply)` both require `authorization: Bearer
+<REDLITE_CLUSTER_TOKEN>` (D-031); without it: `UNAUTHENTICATED`, nothing sent, no registration.
 
-Application codes a reader treats as **terminal** (no reconnect; `reader.LastError()` reports them).
-Every other close — 1000, 1001, 1006, a network error — keeps reconnect-forever (R1).
+The replica sends `Register{instance_id, started_at, epoch}`; the leader answers `register_reply
+{success, epoch}` (or refuses and steps down to a higher epoch, D-012), then: `snapshot_sheet`
+chunks per sheet (`sheet, password_hash, project_id, entries, seq, epoch, last`), `snapshot_end
+{sheets, epoch}`, then the live stream — `heartbeat {epoch, instance_id}`, `replicate_sheet`,
+`replicate`, `op {kind DELETE|DELETE_PREFIX|DELETE_SUFFIX|EXPIRE, …}`, `control {kind
+PROJECT_SUSPENDED|PROJECT_RESUMED|KEY_REVOKED|SESSION_KILL, …}`. `Probe` answers `{role, epoch,
+instance_id}`: a leader that sees a peer leader with a higher epoch steps down (the peer fence).
 
-| code | reason | meaning | reader error |
+## How a stream ends (D-050)
+
+Every server-ended stream carries a status with a `redlite.v1.ErrorDetail{reason, message,
+close_code}` detail. `close_code` keeps the v1 numbers so one vocabulary covers both eras.
+
+| status | reason | close_code | client |
 |---|---|---|---|
-| 4001 | `suspended` | the project is suspended (D-027) | `ErrSuspended` |
-| 4002 | `key revoked` | the API key this session was admitted with was revoked or rotated (D-028) | `ErrAdmitted` |
-| 4003 | `kicked by admin` | an admin closed this session (D-030) | `ErrKicked` |
+| PERMISSION_DENIED | SUSPENDED | 4001 | terminal (`reader.ErrSuspended`) |
+| UNAUTHENTICATED | KEY_REVOKED | 4002 | terminal (`ErrAdmitted`) |
+| ABORTED | KICKED | 4003 | terminal (`ErrKicked`) |
+| UNAUTHENTICATED | INVALID_PASSWORD / NOT_AUTHORIZED | 1008 | `ErrAuthFailed` from New; a running reader retries |
+| FAILED_PRECONDITION | STALE_EPOCH / NOT_LEADER | 1008 / 1001 | fail over |
+| RESOURCE_EXHAUSTED | MESSAGE_TOO_LARGE | 1009 | reconnect |
+| RESOURCE_EXHAUSTED | SLOW_CONSUMER | 1001 | reconnect and resync (D-014) |
+| UNAVAILABLE | GOING_AWAY | 1001 | reconnect |
+| OK | — | — | the client ended the stream |
 
-No longer sent: `full_state` (replaced by the chunked snapshot), `replicate_lock` / `replicate_unlock`
-(locks belong to connections, which a failover drops). See `doc/ASSUMPTIONS.md`.
+**Slow consumer.** Each stream has one writer behind a bounded queue (`REDLITE_CONN_SEND_QUEUE`). A
+broadcast never waits on a peer's flow control; a full queue ends that stream SLOW_CONSUMER.
 
-## HTTP
+**Keepalive.** Server pings an idle connection every `REDLITE_PING_INTERVAL`, drops it after
+`REDLITE_WRITE_TIMEOUT` without an ack; clients may ping no more often than every 5 s.
 
-| method + path | body |
-|---|---|
-| `GET /health` | always 200 `{status:"ok"}`; `role`, `epoch`, `instance_id` added only for a caller with the cluster token (or when none is configured) — a peer reads them to fence a stale leader (D-031) |
-| `/admin/*` | the management API (S6 + tenancy D-026…D-030), `doc/specs/s6_api.md` |
+## Health
+
+`grpc.health.v1.Health/Check` on the client port (open, no credentials): SERVING while the node
+accepts sessions, NOT_SERVING during shutdown. `GET /health` on the admin port is unchanged: 200
+`{status:"ok"}`; `role`, `epoch`, `instance_id` only with the cluster token (D-031); `stats` in
+development only (D-040).
 
 ## The null placeholder
 
-`set_null` stores the literal JSON string `"__NULL__"`. A reader's `IsNull(key)` is true for it and
-`Get` treats it as a miss that the database already answered.
+`set_null` stores the JSON string `"__NULL__"`. A reader's `IsNull(key)` is true for it and `Get`
+treats it as a miss the database already answered.
 
-## v1 compatibility list
+## The retired v1 wire (record)
 
-Fields a shipped reader (`advo_cache/reader/reader.go`, pinned by `backendAdvo`) decodes. **Never
-rename, remove or retype any of these** (`protocol/messages_test.go` asserts the names):
-
-`action, type, success, error, sheet, password, key, value, ttl, prefix, suffix, jitter, lock_ttl,
-deleted, count, data, sheets, instance_id, started_at, owner`
-
-(`sheets` and `owner` belonged to `full_state` / `replicate_lock`, which only a v1 replica decoded.)
-
-## Changes since v1
-
-| Version | Change | Additive | D-id |
-|---|---|---|---|
-| 1 | `id` on every request and reply | yes (omitempty) | ASSUMPTIONS: request id |
-| 1 | `version` on `open`; `protocol_version` on the open reply | yes | D-010 |
-| 1 | `epoch` on requests, open/register replies, `sheet_state` and every replica frame; `stale epoch`, `not leader` errors | yes | D-012 |
-| 1 | `seq` on replies, `sheet_state`, `replicate`, `invalidate` and replica frames | yes | D-014 |
-| 1 | `expires_in_ms` on set replies, `sheet_state`, `replicate` and replica frames | yes | D-008 |
-| 1 | `keys` on `invalidate` (expiry batch) | yes | D-003 |
-| 1 | `base_seq` on `set`; `stale write` error | yes | ASSUMPTIONS: R6 mechanism |
-| 1 | `sheet full`, `sheet not found` errors | yes | D-013 |
-| 1 | `dump` answers an error naming `GET /admin/sheets/{id}/export` | behaviour change, no field change | bootstrap request |
-| 1 | replicas on `/replica`: `snapshot_sheet`, `snapshot_end`, `replicate_sheet`, `replicate_expire`; `full_state`, `replicate_lock`, `replicate_unlock` no longer sent | v1 *clients* unaffected; a v1 replica cannot attach | D-010, ASSUMPTIONS: replica stream |
-| 1 | `invalidate` emits `prefix`/`suffix` even when `""` (whole-sheet flush) | a v1 reader reads `""` as nothing to do | D-005 |
-| 1 | `api_key` on `open`; `not authorized` and `suspended` errors | yes (omitempty; password mode unchanged) | D-024 |
-| 1 | close codes 4001 / 4002 / 4003 | yes — a v1 reader sees an ordinary close and reconnects | D-030 |
-| 1 | replica control frames `project_suspended`, `project_resumed`, `key_revoked`, `session_kill` | yes (new types) | D-027, D-028, D-030 |
-| 1 | `/replica` requires the cluster token; `/health` hides role/epoch without it | behaviour change for peers only | D-031 |
-| 1 | `/health` `stats` object (counts only: sheets, collaborators, entries, index buckets, sweep-log entries, conns, sessions, locks, tenant sets, persist queue, goroutines) — sent **only** when `REDLITE_ENVIRONMENT=development`, omitted elsewhere | yes (omitempty; diagnostic, not part of the compatibility contract) | D-040 |
+Until 2026-11-11 the same operations were JSON text frames over WebSocket: `GET /ws` (frames with
+`action`, replies with `success`, broadcasts with `type`), `GET /replica` (Bearer header), close
+codes 1000/1001/1008/1009/4001/4002/4003, and `/health` + `/admin/*` on the client port. Every v1
+action and frame maps to a message above (`dump` and `register_replica`-on-`/ws` excepted, both
+already refusals). A v1 reader (advo_cache) cannot connect any more; see
+`doc/consumer/backendadvo_migration.md`.

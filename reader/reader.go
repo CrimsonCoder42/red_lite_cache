@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,7 +56,7 @@ const missSeqMax = 65_536
 // Config is the reader's only input. LeaderAddr, BackupAddr, Sheet and Password keep their v1 names
 // (advo_cache/reader/reader.go:58-67); every other field is optional.
 type Config struct {
-	LeaderAddr string // WebSocket URL of the leader, e.g. "ws://cache:8081/ws"
+	LeaderAddr string // the leader's gRPC client port, e.g. "cache:8095"
 	BackupAddr string // optional: the replica, tried alternately with the leader
 	Sheet      string
 	Password   string
@@ -72,7 +73,8 @@ type Config struct {
 	ConnectTimeout time.Duration
 	// WriteTimeout bounds each write and the wait for its acknowledgement.
 	WriteTimeout time.Duration
-	// MaxEntries bounds the local map (R4, D-008).
+	// MaxEntries bounds the local map (R4, D-008). A new key on a full map evicts an expired entry
+	// or the least recently read of a 5-entry sample (D-043); an eviction is a miss.
 	MaxEntries int
 	// MaxPendingDeletes bounds the replay queue; overflow collapses it to one delete_prefix "" (D-005).
 	MaxPendingDeletes int
@@ -140,6 +142,7 @@ type Reader struct {
 	connected atomic.Bool           // written under cmu; read lock-free by Get/Has
 	epoch     atomic.Uint64         // highest leader epoch seen (D-012)
 	nextID    atomic.Uint64
+	panics    atomic.Int64 // panics recovered in a session's read loop (Stats.Panics); never reset
 
 	cmu   sync.Mutex // guards sess, queue, every session's pending/dead, and connected transitions
 	sess  *session
@@ -168,6 +171,11 @@ func newReader(cfg Config, now func() time.Time) (*Reader, error) {
 	if cfg.Sheet == "" {
 		return nil, errors.New("reader: Sheet required")
 	}
+	for _, a := range []string{cfg.LeaderAddr, cfg.BackupAddr} {
+		if strings.HasPrefix(a, "ws://") || strings.HasPrefix(a, "wss://") {
+			return nil, fmt.Errorf("reader: %q is a WebSocket URL; the wire is gRPC since D-048: use host:port", a)
+		}
+	}
 	ctx, cancel := context.WithCancel(cfg.Context)
 	r := &Reader{
 		cfg:    cfg,
@@ -179,6 +187,7 @@ func newReader(cfg Config, now func() time.Time) (*Reader, error) {
 		first:  make(chan error, 1),
 	}
 	r.wg.Go(r.run)
+	r.wg.Go(r.expireLoop)
 
 	t := time.NewTimer(cfg.ConnectTimeout)
 	defer t.Stop()
@@ -195,6 +204,26 @@ func newReader(cfg Config, now func() time.Time) (*Reader, error) {
 		return nil, fmt.Errorf("reader: new: %w", ctx.Err())
 	}
 	return r, nil
+}
+
+// localExpireEvery is how often the reader drops its expired entries (D-045). A read misses an
+// expired entry whenever it runs (R4); this only frees memory, so 1 s (the wheel's bucket) is
+// enough.
+const localExpireEvery = time.Second
+
+// expireLoop runs the local expiry pass every localExpireEvery on the reader's clock until Close.
+// Owned by r.wg; it holds local.mu only for the pass, which walks the wheel's due seconds.
+func (r *Reader) expireLoop() {
+	t := time.NewTicker(localExpireEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-t.C:
+			r.local.expirePass(r.now())
+		}
+	}
 }
 
 func (r *Reader) signalFirst(err error) {
@@ -411,7 +440,8 @@ func (r *Reader) release() {
 // contract (doc/protocol/wire.md): fields may be added, renamed or removed in any release.
 type Stats struct {
 	// Entries is the local map's size, expired entries not yet removed included (expiry is lazy:
-	// an expired entry is a miss and is dropped on eviction, invalidate or the next sheet_state).
+	// an expired entry is a miss and is dropped by the local expiry pass every second (D-045), on
+	// eviction, invalidate or the next sheet_state).
 	Entries int
 	// PendingDeletes is every delete not yet acknowledged by a server: the replay queue (after an
 	// overflow, the one delete_prefix "" it collapsed to, D-005) plus the deletes in flight on the
@@ -419,12 +449,23 @@ type Stats struct {
 	PendingDeletes int
 	// MissRecords is the number of keys with a miss record behind base_seq (R6), at most 65 536.
 	MissRecords int
+	// ForwardNodes and ReverseNodes are the local map's index nodes (cache.Groups: the key order and
+	// the reversed-key order, D-044); each is 0 when the map is empty.
+	ForwardNodes, ReverseNodes int
+	// WheelItems is the local expiry wheel's items (D-045), stale ones included; 0 when empty.
+	WheelItems int
+	// Panics is how many panics a session's read loop recovered since New (each one reset the link).
+	// It survives Close, so a test can assert it is 0 at cleanup; anything else is a bug.
+	Panics int
 }
 
-// Stats returns the reader's current counts (D-038). A closed reader returns Stats{}.
+// Stats returns the reader's current counts (D-038). A closed reader returns zero counts except
+// Panics.
 func (r *Reader) Stats() Stats {
-	var s Stats
-	s.Entries, s.MissRecords = r.local.counts()
+	ls := r.local.stats()
+	s := Stats{Entries: ls.Entries, MissRecords: ls.Misses,
+		ForwardNodes: ls.ForwardNodes, ReverseNodes: ls.ReverseNodes, WheelItems: ls.WheelItems,
+		Panics: int(r.panics.Load())}
 	r.cmu.Lock()
 	s.PendingDeletes = len(r.queue)
 	if r.sess != nil {

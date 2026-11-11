@@ -53,7 +53,7 @@ const unknownCacheSize = -1
 // after advo_cache/reader/reader.go:58-67: same fields; MaxReconnectAttempts is ignored (R1) and
 // ReconnectDelay is the first backoff step (see the package doc).
 type Config struct {
-	LeaderAddr string // WebSocket URL of the leader, e.g. "ws://cache:8095/ws"
+	LeaderAddr string // the leader's gRPC client port, e.g. "cache:8095" (v1's ws:// URL is refused, D-048)
 	BackupAddr string // optional: the replica, tried alternately with the leader
 	Sheet      string
 	Password   string

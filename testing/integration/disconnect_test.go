@@ -51,7 +51,7 @@ func fastReconnect(h *attemptCounter) func(*reader.Config) {
 	}
 }
 
-func proxyWS(p *Proxy) string { return "ws://" + p.Addr + protocol.PathWS }
+func proxyWS(p *Proxy) string { return p.Addr }
 
 // serverMisses fails unless the leader answers key not found for every key.
 func serverMisses(t *testing.T, raw *RawConn, keys ...string) {
@@ -189,7 +189,7 @@ func TestNewWhileLeaderDown(t *testing.T) {
 		addr := ln.Addr().String()
 		ln.Close() // nothing listens here now
 		start := time.Now()
-		a := NewReaderAt(t, "ws://"+addr+protocol.PathWS, "", UniqueSheet(t), fastReconnect(&attemptCounter{}), func(c *reader.Config) {
+		a := NewReaderAt(t, addr, "", UniqueSheet(t), fastReconnect(&attemptCounter{}), func(c *reader.Config) {
 			c.ConnectTimeout = connectTimeout
 		})
 		if el := time.Since(start); el < connectTimeout || el > connectTimeout+time.Second {

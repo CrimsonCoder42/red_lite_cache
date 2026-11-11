@@ -1,17 +1,22 @@
-// Covers: /replica peer auth, peer /health, REDLITE_CLUSTER_TOKEN (D-031, tenancy criterion 9)
+// Covers: Replica/Follow peer auth, peer /health, REDLITE_CLUSTER_TOKEN (D-031, tenancy criterion 9)
 package integration
 
 import (
-	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	pb "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 const peerToken = "t-cluster-token"
@@ -20,28 +25,46 @@ func withClusterToken(token string) func(*config.Config) {
 	return func(c *config.Config) { c.ClusterToken = token }
 }
 
-// dialReplicaPath tries the /replica upgrade with the given Authorization header ("" = none) and
-// returns the HTTP status and the first bytes of the body. A successful upgrade fails the test.
-func dialReplicaPath(t *testing.T, srv *Server, auth string) (int, string) {
+// followGRPC opens Replica/Follow with the given authorization metadata ("" = none). A stream ended
+// UNAUTHENTICATED before any message maps to 401; the "body" is every message received first
+// (there must be none).
+func followGRPC(t *testing.T, srv *Server, auth string) (int, string) {
 	t.Helper()
-	opts := &websocket.DialOptions{}
+	cc, err := grpc.NewClient(srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	ctx := t.Context()
 	if auth != "" {
-		opts.HTTPHeader = http.Header{"Authorization": {auth}}
+		ctx = metadata.AppendToOutgoingContext(ctx, rpcwire.AuthHeader, auth)
 	}
-	c, resp, err := websocket.Dial(t.Context(), srv.ReplicaURL, opts)
+	stream, err := pb.NewReplicaClient(cc).Follow(ctx)
 	if err == nil {
-		c.CloseNow()
-		t.Fatalf("/replica upgraded with Authorization %q", auth)
+		_ = stream.Send(&pb.ReplicaClientMsg{Body: &pb.ReplicaClientMsg_Register{Register: &pb.Register{InstanceId: "intruder"}}})
+		var body strings.Builder
+		for {
+			m, rerr := stream.Recv()
+			if rerr != nil {
+				err = rerr
+				break
+			}
+			body.WriteString(m.String())
+		}
+		if status.Code(err) == codes.Unauthenticated {
+			return http.StatusUnauthorized, body.String()
+		}
+		t.Fatalf("Follow with authorization %q: %v (received %q)", auth, err, body.String())
 	}
-	if resp == nil {
-		t.Fatalf("/replica dial: no HTTP response: %v", err)
+	if status.Code(err) == codes.Unauthenticated {
+		return http.StatusUnauthorized, ""
 	}
-	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body)
+	t.Fatalf("Follow with authorization %q: %v", auth, err)
+	return 0, ""
 }
 
-// TestPeerAuthReplica (criterion 9): without the token, or with a wrong one, /replica answers 401
-// before the upgrade — no snapshot frame, no registration; with it the snapshot is applied.
+// TestPeerAuthReplica (criterion 9): without the token, or with a wrong one, Replica/Follow ends
+// UNAUTHENTICATED (reported as 401) — no snapshot message, no registration; with it the snapshot is applied.
 func TestPeerAuthReplica(t *testing.T) {
 	leader := StartLeader(t, withClusterToken(peerToken))
 	name := UniqueSheet(t)
@@ -50,7 +73,7 @@ func TestPeerAuthReplica(t *testing.T) {
 	}
 
 	for _, auth := range []string{"", "Bearer wrong", "Basic " + peerToken, peerToken} {
-		code, body := dialReplicaPath(t, leader, auth)
+		code, body := followGRPC(t, leader, auth)
 		if code != http.StatusUnauthorized {
 			t.Fatalf("Authorization %q: status %d, want 401", auth, code)
 		}
@@ -58,19 +81,9 @@ func TestPeerAuthReplica(t *testing.T) {
 			t.Fatalf("Authorization %q: 401 body carries snapshot bytes: %q", auth, body)
 		}
 	}
-	// A plain GET (no upgrade headers) is refused the same way.
-	resp, err := http.Get(leader.URL + protocol.PathReplica)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("plain GET /replica: status %d, want 401", resp.StatusCode)
-	}
-
 	// A replica configured with the wrong token never registers and gets no snapshot.
 	bad := TestConfig(t)
-	bad.Role, bad.LeaderAddr, bad.ClusterToken = "replica", leader.ReplicaURL, "not-the-token"
+	bad.Role, bad.LeaderAddr, bad.ClusterToken = "replica", leader.Addr, "not-the-token"
 	bad.InstanceID += "-bad"
 	badSrv := Start(t, bad)
 	time.Sleep(3 * leader.Cfg.HeartbeatInterval)
@@ -115,14 +128,14 @@ func startPairToken(t *testing.T, token string) *pair {
 	t.Helper()
 	lnB := Listen(t)
 	toB := NewProxy(t, lnB.Addr().String())
-	a := StartLeader(t, withClusterToken(token), func(c *config.Config) { c.PeerAddr = "ws://" + toB.Addr })
+	a := StartLeader(t, withClusterToken(token), func(c *config.Config) { c.PeerAddr = toB.Addr })
 	toA := NewProxy(t, a.Addr)
 	cfg := TestConfig(t)
 	cfg.Role = "replica"
 	cfg.InstanceID += "-B"
 	cfg.ClusterToken = token
-	cfg.LeaderAddr = "ws://" + toA.Addr + protocol.PathReplica
-	cfg.PeerAddr = "ws://" + toA.Addr
+	cfg.LeaderAddr = toA.Addr
+	cfg.PeerAddr = toA.Addr
 	b := StartOn(t, lnB, cfg)
 	Eventually(t, "B registered with A", func() bool { return a.App.Node().Replicas() == 1 })
 	p := &pair{A: a, B: b, toA: toA, toB: toB, sheetName: UniqueSheet(t)}

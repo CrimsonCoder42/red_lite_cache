@@ -21,10 +21,10 @@ import (
 
 // Server is one running instance.
 type Server struct {
-	Addr       string // host:port
-	URL        string // http://host:port
-	WSURL      string // ws://host:port/ws
-	ReplicaURL string // ws://host:port/replica
+	Addr       string // host:port of the gRPC client port (Cache, Replica, health)
+	AdminAddr  string // host:port of the admin port (GET /health, /admin/*)
+	URL        string // http://<admin host:port>
+	ClientAddr string // the address a reader or a replica dials (= Addr)
 	App        *app.App
 	Cfg        config.Config
 	// Stop cancels the instance and waits for Run to return. Idempotent; also runs at cleanup.
@@ -84,8 +84,9 @@ func StartReplica(t testing.TB, leader *Server, mods ...func(*config.Config)) *S
 	t.Helper()
 	cfg := TestConfig(t)
 	cfg.Role = "replica"
-	cfg.LeaderAddr = leader.ReplicaURL
+	cfg.LeaderAddr = leader.Addr
 	cfg.ClusterToken = leader.Cfg.ClusterToken
+	cfg.PeerAdminAddr = leader.URL // the leader's admin port (merged sessions, forwarded kills)
 	cfg.InstanceID += "-replica"
 	for _, m := range mods {
 		m(&cfg)
@@ -132,18 +133,21 @@ func TryHealthToken(baseURL, token string) (protocol.Health, error) {
 func StartOn(t testing.TB, ln net.Listener, cfg config.Config) *Server {
 	t.Helper()
 	cfg.Port = ln.Addr().String()
+	adminLn := Listen(t)
+	cfg.AdminPort = adminLn.Addr().String()
 	ctx, cancel := context.WithCancel(context.Background())
 	a, err := app.New(ctx, cfg)
 	if err != nil {
 		cancel()
 		ln.Close()
+		adminLn.Close()
 		t.Fatalf("app.New: %v", err)
 	}
 	done := make(chan struct{})
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = a.Run(ctx, ln)
+		runErr = a.Run(ctx, ln, adminLn)
 	}()
 	var once sync.Once
 	stop := func() {
@@ -156,21 +160,27 @@ func StartOn(t testing.TB, ln net.Listener, cfg config.Config) *Server {
 			}
 		})
 	}
-	t.Cleanup(stop)
+	t.Cleanup(func() {
+		stop()
+		// S1: a panic the server recovered only logs; every harness test fails on one instead.
+		if n := a.Stats().Panics; n > 0 {
+			t.Errorf("server %s recovered %d panics (see the WS: panic recovered log line)", cfg.Port, n)
+		}
+	})
 	addr := ln.Addr().String()
 	return &Server{
-		Addr: addr, URL: "http://" + addr,
-		WSURL: "ws://" + addr + protocol.PathWS, ReplicaURL: "ws://" + addr + protocol.PathReplica,
-		App: a, Cfg: cfg, Stop: stop,
+		Addr: addr, AdminAddr: cfg.AdminPort, URL: "http://" + cfg.AdminPort,
+		ClientAddr: addr,
+		App:        a, Cfg: cfg, Stop: stop,
 		Err: func() error { <-done; return runErr },
 	}
 }
 
-// NewReader connects a reader to srv's /ws for sheet with password "pw" and fast reconnects. It is
+// NewReader connects a reader to srv's client port for sheet with password "pw" and fast reconnects. It is
 // closed at cleanup.
 func NewReader(t testing.TB, srv *Server, sheet string, mods ...func(*reader.Config)) *reader.Reader {
 	t.Helper()
-	return NewReaderAt(t, srv.WSURL, "", sheet, mods...)
+	return NewReaderAt(t, srv.ClientAddr, "", sheet, mods...)
 }
 
 // NewReaderAt is NewReader against explicit leader and backup URLs (backup may be "").
@@ -188,15 +198,25 @@ func NewReaderAt(t testing.TB, leaderWS, backupWS, sheet string, mods ...func(*r
 	if err != nil {
 		t.Fatalf("reader.New(%s): %v", sheet, err)
 	}
-	t.Cleanup(func() { r.Close() })
+	t.Cleanup(func() { r.Close(); CheckNoPanics(t, r) })
 	return r
 }
 
-// OpenRaw dials srv's /ws, opens sheet with password "pw", fails the test unless it succeeds, and
+// CheckNoPanics fails t when r's read loop recovered a panic (S1): the reader resets the link and
+// logs, so without this a panic passes every test. Call it after Close for readers built without
+// NewReaderAt.
+func CheckNoPanics(t testing.TB, r *reader.Reader) {
+	t.Helper()
+	if n := r.Stats().Panics; n > 0 {
+		t.Errorf("reader recovered %d panics (see the Reader: panic recovered log line)", n)
+	}
+}
+
+// OpenRaw dials srv's client port, opens sheet with password "pw", fails the test unless it succeeds, and
 // returns the conn and the sheet_state it received.
 func OpenRaw(t testing.TB, srv *Server, sheet string) (*RawConn, protocol.SheetState) {
 	t.Helper()
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	resp, st := c.Open(sheet, "pw")
 	if !resp.Success {
 		t.Fatalf("open %s: %+v", sheet, resp)

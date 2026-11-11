@@ -80,7 +80,7 @@ func cfStart(t *testing.T, m cfMode, srvMods ...func(*config.Config)) *cfCluster
 		c.sheet = integration.UniqueSheet(t)
 	}
 	for i := range c.st {
-		c.st[i] = c.storeAt(c.srv.WSURL)
+		c.st[i] = c.storeAt(c.srv.ClientAddr)
 	}
 	return c
 }

@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
@@ -134,7 +133,8 @@ func TestL1StoreExpireFreesEntriesAndIndex(t *testing.T) {
 	peak := s.Stats()
 	st.Observe("stats %+v heap %d", peak, integration.HeapAlloc())
 	Above(t, "entries", peak.Entries, base.Entries)
-	Above(t, "head buckets", peak.HeadBuckets, base.HeadBuckets)
+	Above(t, "forward nodes", peak.ForwardNodes, base.ForwardNodes)
+	Above(t, "reverse nodes", peak.ReverseNodes, base.ReverseNodes)
 	gone := s.Expire(now.Add(2 * time.Minute))
 	st.Drain("Expire(now+2m) removed %d", len(gone))
 	if len(gone) != len(keys) {
@@ -394,7 +394,7 @@ func TestL9LockCleanupFrees(t *testing.T) {
 	Within(t, "owners peak", peak.Owners, conns, 0)
 
 	for _, c := range cs[:conns/2] {
-		c.Conn.Close(websocket.StatusNormalClosure, "bye")
+		c.CloseNormal()
 	}
 	integration.Eventually(t, "half the conns' locks released", func() bool {
 		s := locks.Stats()
@@ -408,7 +408,7 @@ func TestL9LockCleanupFrees(t *testing.T) {
 	})
 	st.Drain("clock +2s: locks %+v", locks.Stats())
 	for _, c := range cs[conns/2:] {
-		c.Conn.Close(websocket.StatusNormalClosure, "bye")
+		c.CloseNormal()
 	}
 	integration.Eventually(t, "no collaborators", func() bool { return srv.App.Registry().Stats().Collaborators == 0 })
 	// tolerance 0: every conn is closed on both ends and the leader is the one from BASELINE

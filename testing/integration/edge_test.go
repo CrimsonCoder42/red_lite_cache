@@ -1,4 +1,4 @@
-// Covers: /ws routing edge cases (open gate, auth, malformed, unknown, oversize, register_replica, dump), shutdown mid-write, v1 wire compat, K9, K10, K13, K14, K15, not leader, stale epoch, /health
+// Covers: Cache.Session routing edge cases (open gate, auth, unknown incl. dump, oversize), shutdown mid-write, v1 wire compat, K9, K10, K13, K14, K15, not leader, stale epoch, /health
 package integration
 
 import (
@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
@@ -27,8 +25,8 @@ func TestEdgeRouting(t *testing.T) {
 	srv := StartLeader(t)
 
 	t.Run("action before open", func(t *testing.T) {
-		c := Dial(t, srv.WSURL)
-		for _, a := range []string{protocol.ActionGet, protocol.ActionSet, protocol.ActionLock, protocol.ActionDump, "nonsense"} {
+		c := Dial(t, srv.ClientAddr)
+		for _, a := range []string{protocol.ActionGet, protocol.ActionSet, protocol.ActionLock, "dump", "nonsense"} {
 			r := c.Do(protocol.Request{Action: a, ID: 7, Key: "k"})
 			if r.Success || r.Error != protocol.ErrMsgMustOpen || r.ID != 7 {
 				t.Fatalf("%s before open = %+v, want %q echoing id 7", a, r, protocol.ErrMsgMustOpen)
@@ -39,19 +37,19 @@ func TestEdgeRouting(t *testing.T) {
 	t.Run("wrong password: reply then socket closed", func(t *testing.T) {
 		name := UniqueSheet(t)
 		OpenRaw(t, srv, name)
-		c := Dial(t, srv.WSURL)
+		c := Dial(t, srv.ClientAddr)
 		r := c.Do(protocol.Request{Action: protocol.ActionOpen, ID: 2, Sheet: name, Password: "wrong"})
 		if r.Success || r.Error != protocol.ErrMsgInvalidPassword || r.ID != 2 {
 			t.Fatalf("wrong password reply = %+v", r)
 		}
 		_, err := c.TryNext(5 * time.Second)
-		if st := websocket.CloseStatus(err); st != websocket.StatusPolicyViolation {
-			t.Fatalf("after wrong password: err %v status %d, want close %d", err, st, websocket.StatusPolicyViolation)
+		if st := CloseStatus(err); st != ClosePolicyViolation {
+			t.Fatalf("after wrong password: err %v status %d, want close %d", err, st, ClosePolicyViolation)
 		}
 	})
 
 	t.Run("empty sheet or password", func(t *testing.T) {
-		c := Dial(t, srv.WSURL)
+		c := Dial(t, srv.ClientAddr)
 		for _, req := range []protocol.Request{
 			{Action: protocol.ActionOpen, Password: "pw"},
 			{Action: protocol.ActionOpen, Sheet: "x"},
@@ -65,22 +63,7 @@ func TestEdgeRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed JSON keeps the conn", func(t *testing.T) {
-		c := Dial(t, srv.WSURL)
-		c.SendBytes([]byte(`{"action":"open",`))
-		if r, _ := c.Reply(); r.Error != protocol.ErrMsgInvalidJSON {
-			t.Fatalf("malformed = %+v", r)
-		}
-		c.SendBytes([]byte(`{"action":"get","key":7}`)) // wrong type is malformed too
-		if r, _ := c.Reply(); r.Error != protocol.ErrMsgInvalidJSON {
-			t.Fatalf("mistyped = %+v", r)
-		}
-		if r, _ := c.Open(UniqueSheet(t), "pw"); !r.Success {
-			t.Fatalf("open after malformed: %+v", r)
-		}
-	})
-
-	t.Run("unknown action, already open, key required, dump moved", func(t *testing.T) {
+	t.Run("unknown action (dump included), already open, key required", func(t *testing.T) {
 		c, _ := OpenRaw(t, srv, UniqueSheet(t))
 		cases := []struct {
 			req  protocol.Request
@@ -91,7 +74,7 @@ func TestEdgeRouting(t *testing.T) {
 			{protocol.Request{Action: protocol.ActionSet, Value: []byte(`1`)}, protocol.ErrMsgKeyRequired},
 			{protocol.Request{Action: protocol.ActionDelete}, protocol.ErrMsgKeyRequired},
 			{protocol.Request{Action: protocol.ActionLock}, protocol.ErrMsgKeyRequired},
-			{protocol.Request{Action: protocol.ActionDump}, protocol.ErrMsgDumpMoved},
+			{protocol.Request{Action: "dump"}, protocol.ErrMsgUnknownAction}, // no message on the Cache service: dump is GET /admin/sheets/{id}/export
 			{protocol.Request{Action: protocol.ActionGet, Key: "missing"}, protocol.ErrMsgKeyNotFound},
 		}
 		for _, tc := range cases {
@@ -116,17 +99,8 @@ func TestEdgeRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("register_replica on /ws", func(t *testing.T) {
-		// A duplicate register on /replica is wave 3 (internal/replica, replica_test.go).
-		c := Dial(t, srv.WSURL)
-		r := c.Do(protocol.Request{Action: protocol.ActionRegisterReplica, InstanceID: "x", StartedAt: time.Now().UTC().Format(time.RFC3339)})
-		if r.Error != protocol.ErrMsgUseReplicaPath {
-			t.Fatalf("register_replica on /ws = %+v", r)
-		}
-	})
-
 	t.Run("open reply carries epoch and protocol_version; same-epoch write accepted", func(t *testing.T) {
-		c := Dial(t, srv.WSURL)
+		c := Dial(t, srv.ClientAddr)
 		r, _ := c.Open(UniqueSheet(t), "pw")
 		if !r.Success || r.Epoch != 1 || r.ProtocolVersion != protocol.Version {
 			t.Fatalf("open reply = %+v, want epoch 1 protocol_version %d", r, protocol.Version)
@@ -190,7 +164,7 @@ func TestEdgeStaleEpoch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := StartLeader(t)
-			c := Dial(t, srv.WSURL)
+			c := Dial(t, srv.ClientAddr)
 			name := UniqueSheet(t)
 			if tc.name == "set" {
 				if r, _ := c.Open(name, "pw"); !r.Success {
@@ -205,7 +179,7 @@ func TestEdgeStaleEpoch(t *testing.T) {
 			if h := Health(t, srv); h.Role != "leader" || h.Epoch != 1 {
 				t.Fatalf("health after an unverified epoch claim = %+v, want leader at epoch 1", h)
 			}
-			c2 := Dial(t, srv.WSURL)
+			c2 := Dial(t, srv.ClientAddr)
 			if r, _ := c2.Open(name, "pw"); !r.Success || r.Epoch != 1 {
 				t.Fatalf("open after the claim = %+v, want success at epoch 1", r)
 			}
@@ -219,8 +193,8 @@ func TestEdgeOversizedFrame(t *testing.T) {
 	c, _ := OpenRaw(t, srv, UniqueSheet(t))
 	c.Send(protocol.Request{Action: protocol.ActionSet, Key: "k", Value: []byte(`"` + strings.Repeat("x", 4096) + `"`)})
 	_, err := c.TryNext(5 * time.Second)
-	if st := websocket.CloseStatus(err); st != websocket.StatusMessageTooBig {
-		t.Fatalf("oversized frame: err %v status %d, want %d", err, st, websocket.StatusMessageTooBig)
+	if st := CloseStatus(err); st != CloseMessageTooBig {
+		t.Fatalf("oversized frame: err %v status %d, want %d", err, st, CloseMessageTooBig)
 	}
 }
 
@@ -247,7 +221,7 @@ func TestEdgeV1Client(t *testing.T) {
 		Suffix string          `json:"suffix,omitempty"`
 		Data   map[string]json.RawMessage
 	}
-	v1 := Dial(t, srv.WSURL)
+	v1 := Dial(t, srv.ClientAddr)
 	v1.SendBytes([]byte(`{"action":"open","sheet":"` + name + `","password":"pw"}`))
 	var open v1Response
 	if err := json.Unmarshal(v1.Next(), &open); err != nil || !open.Success || open.Sheet != name {
@@ -360,7 +334,7 @@ func TestEdgeSheetSurvivesLastLeave(t *testing.T) {
 	name := UniqueSheet(t)
 	a, _ := OpenRaw(t, srv, name)
 	a.Do(protocol.Request{Action: protocol.ActionSet, Key: "k", Value: []byte(`"v"`), TTL: 5})
-	a.Conn.Close(websocket.StatusNormalClosure, "bye")
+	a.CloseNormal()
 	Eventually(t, "no live conns", func() bool { return srv.App.Conns() == 0 })
 	b, st := OpenRaw(t, srv, name)
 	if string(st.Data["k"]) != `"v"` || st.Seq != 1 {
@@ -370,7 +344,7 @@ func TestEdgeSheetSurvivesLastLeave(t *testing.T) {
 		t.Fatalf("get after reopen = %+v", r)
 	}
 	// the password is still the sheet's: a wrong one is refused
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	if r := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: name, Password: "other"}); r.Error != protocol.ErrMsgInvalidPassword {
 		t.Fatalf("reopen with another password = %+v", r)
 	}
@@ -381,7 +355,7 @@ func TestEdgeSheetSurvivesLastLeave(t *testing.T) {
 func TestEdgeNoAutocreate(t *testing.T) {
 	srv := StartLeader(t, func(c *config.Config) { c.SheetAutocreate = false })
 	name := UniqueSheet(t)
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	if r := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: name, Password: "pw"}); r.Error != protocol.ErrMsgSheetNotFound {
 		t.Fatalf("open unknown = %+v", r)
 	}
@@ -444,10 +418,10 @@ func TestEdgeSlowConsumerKicked(t *testing.T) {
 func TestEdgeReplicaRefusesOpen(t *testing.T) {
 	cfg := TestConfig(t)
 	cfg.Role = "replica"
-	cfg.LeaderAddr = "ws://127.0.0.1:1" + protocol.PathReplica
+	cfg.LeaderAddr = "127.0.0.1:1"
 	cfg.HeartbeatTimeout = time.Minute // a lone replica promotes after this; keep it a replica for the test
 	srv := Start(t, cfg)
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	if r := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: UniqueSheet(t), Password: "pw"}); r.Error != protocol.ErrMsgNotLeader {
 		t.Fatalf("open on replica = %+v", r)
 	}

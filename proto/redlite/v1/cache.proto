@@ -1,0 +1,191 @@
+// red_lite_cache wire contract, client side (doc/specs/s10_grpc.md, D-048). This file and
+// replica.proto are the contract between the server (Go now, Rust later) and every reader.
+// Field numbers are permanent: a removed field is `reserved`, never reused.
+//
+// Generated Go code: protocol/redlitev1 (`make proto`). A test fails when it is stale.
+syntax = "proto3";
+
+package redlite.v1;
+
+option go_package = "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1;redlitev1";
+
+// Cache is the client service, served on the client port (REDLITE_PORT, :8095 leader, :8096
+// replica). One Session stream is one client session: requests, their replies and every broadcast
+// travel on it in ONE order, the order the server applied them (D-014, R2, R6).
+//
+// Admission: the first ClientMsg must be `open`. Project-key admission (REDLITE_ADMISSION=key)
+// reads the API key from the call metadata `authorization: Bearer <key>`; v1 password admission
+// uses Open.password. A refused open ends the stream with a status (see ErrorDetail).
+service Cache {
+  rpc Session(stream ClientMsg) returns (stream ServerMsg);
+}
+
+// ClientMsg is every client → server message. `id` is chosen by the client and echoed on the
+// reply; `epoch` is the highest leader epoch the client has seen (D-012).
+message ClientMsg {
+  uint64 id = 1;
+  uint64 epoch = 2;
+  oneof body {
+    Open open = 10;
+    Get get = 11;
+    Set set = 12;
+    SetNull set_null = 13;
+    Delete delete = 14;
+    DeletePrefix delete_prefix = 15;
+    DeleteSuffix delete_suffix = 16;
+    Lock lock = 17;
+    Unlock unlock = 18;
+  }
+}
+
+// Open admits the session to one sheet. Reply: Reply{success, sheet, protocol_version, epoch,
+// seq}, then the sheet's state as StateChunk messages (keys sorted, last = true on the final one).
+message Open {
+  string sheet = 1;
+  string password = 2;
+  uint32 version = 3; // protocol version the client speaks; 0 = 1
+}
+
+// Get reads one key from the server copy. A miss is Reply{success: false, error: "key not found"}.
+// Every message names its sheet: "" = the session's sheet; another name is refused.
+message Get {
+  string sheet = 1;
+  string key = 2;
+}
+
+// Set stores a value. `value` is opaque bytes (the JSON the client sent), never decoded by the
+// server. Reply carries seq and expires_in_ms; other sessions of the sheet receive Replicate.
+message Set {
+  string sheet = 1;
+  string key = 2;
+  bytes value = 3;
+  uint32 ttl_minutes = 4; // 0 = the server default (REDLITE_CACHE_TTL)
+  // R6: the sheet seq the client had applied when it missed this key. Absent = unconditional.
+  // The server refuses with "stale write" when an invalidation covering the key came after it.
+  optional uint64 base_seq = 5;
+}
+
+// SetNull stores the null placeholder `"__NULL__"` (a miss the database already answered).
+message SetNull {
+  string sheet = 1;
+  string key = 2;
+  uint32 ttl_minutes = 3;
+}
+
+// Delete removes one key. Others receive Invalidate{key}.
+message Delete {
+  string sheet = 1;
+  string key = 2;
+}
+
+// DeletePrefix removes every key starting with prefix; "" removes every key of the sheet.
+message DeletePrefix {
+  string sheet = 1;
+  string prefix = 2;
+}
+
+// DeleteSuffix removes every key ending with suffix; "" removes every key of the sheet.
+message DeleteSuffix {
+  string sheet = 1;
+  string suffix = 2;
+}
+
+// Lock takes a lock owned by this session (released when the session ends).
+message Lock {
+  string sheet = 1;
+  string key = 2;
+  uint32 lock_ttl_seconds = 3; // 0 = REDLITE_LOCK_TTL
+}
+
+// Unlock releases a lock this session owns.
+message Unlock {
+  string sheet = 1;
+  string key = 2;
+}
+
+// ServerMsg is every server → client message: a Reply (id = the request's id) or a broadcast
+// (id = 0), in the order the server applied them.
+message ServerMsg {
+  uint64 id = 1;
+  oneof body {
+    Reply reply = 10;
+    StateChunk state = 11;
+    Replicate replicate = 12;
+    Invalidate invalidate = 13;
+  }
+}
+
+// Reply answers one ClientMsg. `error` is one of the wire strings of doc/protocol/wire.md (a
+// reader compares them: "stale write", "not leader", "stale epoch", "key not found", …); a refusal
+// that ends the session is a stream status instead.
+message Reply {
+  bool success = 1;
+  string error = 2;
+  string sheet = 3;
+  string key = 4;
+  bytes value = 5;
+  int64 deleted = 6;
+  int64 count = 7;
+  uint32 protocol_version = 8; // open reply
+  uint64 epoch = 9; // open reply
+  uint64 seq = 10; // the sheet seq after this write (open: the state's seq)
+  int64 expires_in_ms = 11; // set: remaining lifetime after jitter; 0 = none
+}
+
+// StateChunk is one piece of a sheet's state, sent after the open reply. Entries are sorted by key
+// bytes across all chunks of one open; every chunk stays under the message limit (s9 §3).
+message StateChunk {
+  string sheet = 1;
+  uint64 seq = 2;
+  uint64 epoch = 3;
+  repeated Entry entries = 4;
+  bool last = 5;
+  uint32 chunk = 6; // 0-based index within this open
+}
+
+// Entry is one key of a state chunk or a snapshot.
+message Entry {
+  string key = 1;
+  bytes value = 2;
+  int64 expires_in_ms = 3; // remaining lifetime; 0 = no expiry
+}
+
+// Replicate is a set by another session of the sheet.
+message Replicate {
+  string sheet = 1;
+  string key = 2;
+  bytes value = 3;
+  uint64 seq = 4;
+  int64 expires_in_ms = 5;
+  uint64 epoch = 6; // replica stream only
+}
+
+// Invalidate is a delete by another session, or an expiry batch. Exactly one target is set; an
+// empty prefix or suffix means every key of the sheet.
+message Invalidate {
+  string sheet = 1;
+  uint64 seq = 2;
+  oneof target {
+    string key = 3;
+    KeyList keys = 4;
+    string prefix = 5;
+    string suffix = 6;
+  }
+}
+
+// KeyList is a list of keys (an expiry batch).
+message KeyList {
+  repeated string keys = 1;
+}
+
+// ErrorDetail rides in the status details of a stream that ends with an error, so a client can act
+// on it without parsing text. close_code keeps the v1 application codes: 4001 suspended, 4002 key
+// revoked, 4003 kicked by admin — a reader treats those as terminal (no reconnect, D-030); every
+// other end of a stream keeps reconnect-forever (R1).
+message ErrorDetail {
+  // NOT_AUTHORIZED, INVALID_PASSWORD, SHEET_NOT_FOUND, SUSPENDED, KEY_REVOKED, KICKED,
+  // SLOW_CONSUMER, GOING_AWAY, NOT_LEADER, STALE_EPOCH, MESSAGE_TOO_LARGE, PROTOCOL
+  string reason = 1;
+  string message = 2;
+  int32 close_code = 3;
+}

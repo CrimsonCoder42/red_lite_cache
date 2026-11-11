@@ -6,7 +6,8 @@ package app
 import (
 	"context"
 	"fmt"
-	"net/url"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	"github.com/CrimsonCoder42/red_lite_cache/db"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/api"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/persist"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/replica"
@@ -24,7 +26,7 @@ import (
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
-// wiredNode is App.node: the replica node (ws.Node through embedding) plus the persistence handles
+// wiredNode is App.node: the replica node (rpc.Node through embedding) plus the persistence handles
 // App exposes (Store, Writer).
 type wiredNode struct {
 	*replica.Node
@@ -36,7 +38,7 @@ type wiredNode struct {
 	toucher *api.Toucher     // last_used_at throttle (D-028); set by wireTenancy
 
 	// persistCtx runs the writer and the cleaner. Its cancel (connsClosed) runs only after the HTTP
-	// server shut down and every /ws connection closed, so ops applied while clients disconnect
+	// server shut down and every client session closed, so ops applied while clients disconnect
 	// are still flushed (review HIGH: shutdown ordering). Set in New.
 	persistCtx  context.Context
 	stopPersist context.CancelFunc
@@ -52,7 +54,7 @@ func (a *App) Store() *db.Store { return a.wired().store }
 func (a *App) Writer() *persist.Writer { return a.wired().writer }
 
 // Auditor is the audit sink (D-026): audit_events through a bounded queue with persistence,
-// NopAuditor without. Built before /ws, so the ws handler and the admin API share it.
+// NopAuditor without. Built before the Cache service, so the session handler and the admin API share it.
 func (a *App) Auditor() tenant.Auditor { return a.wired().auditor }
 
 func (a *App) wired() *wiredNode { return a.node.(*wiredNode) }
@@ -109,7 +111,7 @@ func (a *App) wireReplicaPersist(ctx context.Context) (err error) {
 		SendQueue: cfg.ReplicaSendQueue, MaxFrameBytes: cfg.ReplicaMaxFrameBytes,
 		PingInterval: cfg.PingInterval, WriteTimeout: cfg.WriteTimeout,
 		Store:       w.store,
-		KickClients: func(reason string) { a.ws.KickAll(reason) }, // a.ws is set later in New
+		KickClients: func(reason string) { a.clients.KickAll(reason) }, // a.clients is set later in New
 		OnPromote:   a.onPromote,
 		OnControl:   func(c protocol.ReplicaControl) { a.applyTenancy(c, "stream") },
 		Elector:     elector,
@@ -134,7 +136,7 @@ func (a *App) wireReplicaPersist(ctx context.Context) (err error) {
 		a.reg.AddObserver(w.writer)
 	}
 	a.reg.AddObserver(node)
-	a.mux.Handle(protocol.PathReplica, node)
+	// The Replica service is registered on the gRPC server in New (D-048).
 	return nil
 }
 
@@ -263,7 +265,7 @@ func (a *App) wireTenancy(ctx context.Context) (api.Options, error) {
 	a.tenants.OnAdmit(w.toucher.Touch)
 	return api.Options{
 		Tenants: a.tenants, Sessions: a.sessions, Auditor: w.auditor,
-		Propagate: a.propagate, PeerURL: peerURL(a.cfg.PeerAddr, a.cfg.LeaderAddr, a.cfg.IsReplica()),
+		Propagate: a.propagate, PeerURL: peerAdminURL(a.cfg),
 	}, nil
 }
 
@@ -371,27 +373,25 @@ func (a *App) ensureAuditPartitions(ctx context.Context) {
 	}
 }
 
-// peerURL is the other node's http(s)://host:port for the admin API's peer calls: REDLITE_PEER_ADDRESS,
-// else a replica's leader address; "" when neither is set or it does not parse.
-func peerURL(peerAddr, leaderAddr string, isReplica bool) string {
-	addr := peerAddr
-	if addr == "" && isReplica {
-		addr = leaderAddr
+// peerAdminURL is the other node's admin base URL for the admin API's peer calls (D-049):
+// REDLITE_PEER_ADMIN_ADDRESS; else the peer's host (REDLITE_PEER_ADDRESS, else a replica's leader
+// address) on this node's admin port number.
+func peerAdminURL(cfg config.Config) string {
+	if cfg.PeerAdminAddr != "" {
+		return strings.TrimRight(cfg.PeerAdminAddr, "/")
+	}
+	addr := cfg.PeerAddr
+	if addr == "" && cfg.IsReplica() {
+		addr = cfg.LeaderAddr
 	}
 	if addr == "" {
 		return ""
 	}
-	u, err := url.Parse(addr)
-	if err != nil || u.Host == "" {
-		logger.L.Warn("API: peer address ignored", "err", err)
+	host, _, err := net.SplitHostPort(strings.TrimPrefix(addr, "grpc://"))
+	_, port, perr := net.SplitHostPort(cfg.AdminPort)
+	if err != nil || perr != nil {
+		logger.L.Warn("API: peer admin address not derivable; set REDLITE_PEER_ADMIN_ADDRESS", "peer", addr)
 		return ""
 	}
-	switch u.Scheme {
-	case "ws":
-		u.Scheme = "http"
-	case "wss":
-		u.Scheme = "https"
-	}
-	u.Path, u.RawQuery, u.Fragment = "", "", ""
-	return u.String()
+	return "http://" + net.JoinHostPort(host, port)
 }

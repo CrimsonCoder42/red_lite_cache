@@ -32,7 +32,7 @@ func BenchmarkApplySet3Collaborators(b *testing.B) {
 	}
 	keys := make([]string, 1024)
 	for i := range keys {
-		keys[i] = fmt.Sprintf("root:patient:%d:view", i)
+		keys[i] = fmt.Sprintf("root:owner:%d:view", i)
 	}
 	ack := []byte(`{"success":true}`)
 	i := 0

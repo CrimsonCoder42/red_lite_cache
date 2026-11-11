@@ -88,7 +88,7 @@ func TestTerminalOpenSuspended(t *testing.T) {
 	srv.App.Tenants().SetSuspended(s.ProjectID(), true)
 	t.Cleanup(func() { srv.App.Tenants().SetSuspended(s.ProjectID(), false) })
 	_, err := reader.New(reader.Config{
-		LeaderAddr: srv.WSURL, Sheet: name, Password: "pw",
+		LeaderAddr: srv.ClientAddr, Sheet: name, Password: "pw",
 		ReconnectMin: 10 * time.Millisecond, ReconnectMax: 100 * time.Millisecond, ConnectTimeout: 5 * time.Second,
 	})
 	if !errors.Is(err, reader.ErrSuspended) {

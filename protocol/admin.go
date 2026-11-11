@@ -2,7 +2,7 @@ package protocol
 
 import "encoding/json"
 
-// Management API bodies (S6, internal/api). HTTP JSON, not WebSocket frames, but still wire types a
+// Management API bodies (S6, internal/api). HTTP JSON, not gRPC messages, but still wire types a
 // consumer or an operator script reads, so they live here.
 //
 // Auth: `Authorization: Bearer <key>` — the REDLITE_ADMIN_KEY, or a project's API key where the
@@ -114,7 +114,7 @@ type ProjectDetail struct {
 	SheetsList []SheetInfo `json:"sheets_list"`
 }
 
-// SessionInfo is one live session (D-026): one authenticated WebSocket connection on Node.
+// SessionInfo is one live session (D-026): one authenticated Cache.Session stream on Node.
 type SessionInfo struct {
 	SessionID   string `json:"session_id"`
 	ProjectID   string `json:"project_id"`

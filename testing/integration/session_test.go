@@ -1,18 +1,16 @@
-// Covers: sessions on /ws (D-026: create on open, last_seen/frames, remove on close) and kill by close code (D-030, D-028)
+// Covers: sessions on Cache.Session (D-026: create on open, last_seen/frames, remove on close) and kill by close code (D-030, D-028)
 package integration
 
 import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
 // expectClose fails unless the next read on c ends with close status code within d.
-func expectClose(t *testing.T, c *RawConn, code websocket.StatusCode, d time.Duration) {
+func expectClose(t *testing.T, c *RawConn, code int, d time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(d)
 	for {
@@ -20,7 +18,7 @@ func expectClose(t *testing.T, c *RawConn, code websocket.StatusCode, d time.Dur
 		if err == nil {
 			continue // a frame queued before the close
 		}
-		if st := websocket.CloseStatus(err); st != code {
+		if st := CloseStatus(err); st != code {
 			t.Fatalf("read err %v status %d, want close %d within %s", err, st, code, d)
 		}
 		return
@@ -36,7 +34,7 @@ func TestSessionLoop(t *testing.T) {
 	name := newSheet(t, srv, a.Project)
 	sessions := srv.App.Sessions()
 
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	open := c.openKey(name, "pw", a.Key)
 	if !open.Success {
 		t.Fatalf("open = %+v", open)
@@ -74,7 +72,7 @@ func TestSessionLoop(t *testing.T) {
 
 	t.Run("kill by key closes only that key's session", func(t *testing.T) {
 		k2 := issueKey(t, srv, a.Project)
-		c1, c2 := Dial(t, srv.WSURL), Dial(t, srv.WSURL)
+		c1, c2 := Dial(t, srv.ClientAddr), Dial(t, srv.ClientAddr)
 		if r := c1.openKey(name, "pw", a.Key); !r.Success {
 			t.Fatalf("open k1 = %+v", r)
 		}

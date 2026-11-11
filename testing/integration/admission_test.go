@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/api"
@@ -79,13 +78,13 @@ func (r *RawConn) openKey(sheet, password, key string) protocol.Response {
 }
 
 // expectRefused fails unless the open was answered msg and the socket then closed with code.
-func expectRefused(t *testing.T, c *RawConn, resp protocol.Response, msg string, code websocket.StatusCode) {
+func expectRefused(t *testing.T, c *RawConn, resp protocol.Response, msg string, code int) {
 	t.Helper()
 	if resp.Success || resp.Error != msg || resp.ID != 1 {
 		t.Fatalf("open reply = %+v, want error %q echoing id 1", resp, msg)
 	}
 	_, err := c.TryNext(5 * time.Second)
-	if st := websocket.CloseStatus(err); st != code {
+	if st := CloseStatus(err); st != code {
 		t.Fatalf("after %q: err %v status %d, want close %d", msg, err, st, code)
 	}
 }
@@ -100,12 +99,12 @@ func TestAdmissionLoop(t *testing.T) {
 
 	refused := func(t *testing.T, sheet, pw, key string) {
 		t.Helper()
-		c := Dial(t, srv.WSURL)
-		expectRefused(t, c, c.openKey(sheet, pw, key), protocol.ErrMsgNotAuthorized, websocket.StatusPolicyViolation)
+		c := Dial(t, srv.ClientAddr)
+		expectRefused(t, c, c.openKey(sheet, pw, key), protocol.ErrMsgNotAuthorized, ClosePolicyViolation)
 	}
 	joined := func(t *testing.T, key string) {
 		t.Helper()
-		c := Dial(t, srv.WSURL)
+		c := Dial(t, srv.ClientAddr)
 		if r := c.openKey(sheetA, "pw", key); !r.Success || r.Sheet != sheetA {
 			t.Fatalf("open with the project's key = %+v", r)
 		}
@@ -120,7 +119,7 @@ func TestAdmissionLoop(t *testing.T) {
 
 	t.Run("suspended refused with 4001, resumed joins", func(t *testing.T) {
 		srv.App.Tenants().SetSuspended(a.Project, true)
-		c := Dial(t, srv.WSURL)
+		c := Dial(t, srv.ClientAddr)
 		expectRefused(t, c, c.openKey(sheetA, "pw", a.Key), protocol.ErrMsgSuspended, protocol.CloseSuspended)
 		srv.App.Tenants().SetSuspended(a.Project, false)
 		joined(t, a.Key)
@@ -154,8 +153,8 @@ func TestAdmissionAutocreateIgnoredInProduction(t *testing.T) {
 		srv := StartLeader(t, production, func(cfg *config.Config) { cfg.SheetAutocreate = true })
 		a := newProject(t, srv)
 		before := srv.App.Registry().Len()
-		c := Dial(t, srv.WSURL)
-		expectRefused(t, c, c.openKey(UniqueSheet(t), "pw", a.Key), protocol.ErrMsgNotAuthorized, websocket.StatusPolicyViolation)
+		c := Dial(t, srv.ClientAddr)
+		expectRefused(t, c, c.openKey(UniqueSheet(t), "pw", a.Key), protocol.ErrMsgNotAuthorized, ClosePolicyViolation)
 		if n := srv.App.Registry().Len(); n != before {
 			t.Fatalf("registry grew %d → %d: an unknown sheet was autocreated in production", before, n)
 		}
@@ -173,7 +172,7 @@ func TestAdmissionPasswordModeV1(t *testing.T) {
 	})
 	name := UniqueSheet(t)
 
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	c.SendBytes([]byte(`{"action":"open","sheet":"` + name + `","password":"pw"}`))
 	resp, _ := c.Reply()
 	if !resp.Success || resp.Sheet != name {
@@ -184,19 +183,19 @@ func TestAdmissionPasswordModeV1(t *testing.T) {
 		t.Fatalf("v1 open: expected sheet_state, got %+v (err %v)", st, err)
 	}
 
-	w := Dial(t, srv.WSURL)
+	w := Dial(t, srv.ClientAddr)
 	w.SendBytes([]byte(`{"action":"open","sheet":"` + name + `","password":"wrong"}`))
 	if r, _ := w.Reply(); r.Success || r.Error != protocol.ErrMsgInvalidPassword {
 		t.Fatalf("v1 wrong password = %+v, want %q", r, protocol.ErrMsgInvalidPassword)
 	}
-	if _, err := w.TryNext(5 * time.Second); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+	if _, err := w.TryNext(5 * time.Second); CloseStatus(err) != ClosePolicyViolation {
 		t.Fatalf("v1 wrong password: err %v, want close 1008", err)
 	}
 
 	t.Run("revoked name never autocreated", func(t *testing.T) {
 		gone := UniqueSheet(t)
 		srv.App.Tenants().MarkRevoked(gone)
-		r := Dial(t, srv.WSURL).Do(protocol.Request{Action: protocol.ActionOpen, Sheet: gone, Password: "pw"})
+		r := Dial(t, srv.ClientAddr).Do(protocol.Request{Action: protocol.ActionOpen, Sheet: gone, Password: "pw"})
 		if r.Success || r.Error != protocol.ErrMsgSheetNotFound {
 			t.Fatalf("open of a revoked name = %+v, want %q", r, protocol.ErrMsgSheetNotFound)
 		}

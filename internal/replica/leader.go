@@ -3,21 +3,18 @@ package replica
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"sync"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/rpc"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
-	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
-	"github.com/CrimsonCoder42/red_lite_cache/internal/ws"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
-// Reply errors on PathReplica that are not in protocol (no reader compares them).
+// Reply errors on Replica/Follow that are not in protocol (no reader compares them).
 const (
 	errMsgAlreadyRegistered = "replica already registered"
 	errMsgInstanceRequired  = "instance_id required"
@@ -26,63 +23,42 @@ const (
 
 // replicaConn is one registered replica on the leader.
 type replicaConn struct {
-	c          *ws.Conn
+	c          *rpc.Conn
 	instanceID string
 }
 
-// session is the state of one /replica socket before and after it registers.
+// session is the state of one replica stream before and after it registers.
 type replicaSession struct {
 	n      *Node
-	c      *ws.Conn
+	c      *rpc.Conn
 	remote string
 	mu     sync.Mutex // guards rc: frames are read in order, but Observe reads rc from other goroutines via the hub only
 	rc     *replicaConn
 }
 
-// ServeHTTP serves protocol.PathReplica on the leader: accept, read register_replica, reply
-// {success, epoch}, add the connection to the hub, then one snapshot_sheet per sheet and
-// snapshot_end. Every op applied after the hub add reaches the replica after its sheet's snapshot.
+// serveReplica runs one replica session on t (the gRPC Replica service, grpc.go): read
+// register_replica, reply {success, epoch}, add the connection to the hub, then one snapshot sheet
+// (in chunks) per sheet and snapshot_end. Every op applied after the hub add reaches the replica
+// after its sheet's snapshot. The caller (Follow) has checked the cluster token (D-031) and entered
+// the hub.
 //
 // after advo_cache/ws/handler.go:453-501 (handleRegisterReplica + sendFullState): the register
-// moved from /ws to its own path, the one full_state frame became one frame per sheet taken under
-// the sheet mutex (K6), the reply comes first and carries the epoch, and a replica with a higher
-// epoch fences this leader (D-012).
-//
-// D-031: the cluster token is checked before the hub, the upgrade or any read — a peer without it
-// gets 401 and not one byte of the snapshot.
-func (n *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !tenant.CheckBearer(r, n.opts.ClusterToken) {
-		reason := "wrong cluster token"
-		if r.Header.Get("Authorization") == "" {
-			reason = "missing cluster token"
-		}
-		logger.L.Warn("Replica: peer refused", "remote", r.RemoteAddr, "reason", reason)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if !n.hub.enter() {
-		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
-		return
-	}
-	defer n.hub.leave()
-	wsc, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		logger.L.Warn("Replica: upgrade failed", "remote", r.RemoteAddr, "err", err)
-		return
-	}
-	wsc.SetReadLimit(n.opts.MaxFrameBytes)
-	c := ws.NewConn(wsc, ws.ConnOptions{
+// moved to its own service, the one full_state frame became one chunked snapshot per sheet taken
+// under the sheet mutex (K6), the reply comes first and carries the epoch, and a replica with a
+// higher epoch fences this leader (D-012).
+func (n *Node) serveReplica(ctx context.Context, t rpc.Transport, remote string) {
+	c := rpc.NewConn(t, rpc.ConnOptions{
 		SendQueue: n.opts.SendQueue, PingInterval: n.opts.PingInterval,
-		WriteTimeout: n.opts.WriteTimeout, Remote: r.RemoteAddr,
+		WriteTimeout: n.opts.WriteTimeout, Remote: remote,
 	})
-	s := &replicaSession{n: n, c: c, remote: r.RemoteAddr}
-	err = c.Run(r.Context(), s.handle)
+	s := &replicaSession{n: n, c: c, remote: remote}
+	err := c.Run(ctx, s.handle)
 	s.mu.Lock()
 	rc := s.rc
 	s.mu.Unlock()
 	if rc != nil {
 		n.hub.remove(rc)
-		logger.L.Info("Replica: disconnected", "instance_id", rc.instanceID, "remote", r.RemoteAddr, "status", int(websocket.CloseStatus(err)))
+		logger.L.Info("Replica: disconnected", "instance_id", rc.instanceID, "remote", remote, "err", err)
 	}
 }
 
@@ -93,7 +69,7 @@ func (s *replicaSession) reply(resp protocol.Response) {
 
 func (s *replicaSession) refuse(msg string) {
 	b, _ := json.Marshal(protocol.Response{Error: msg})
-	s.c.SendAndClose(b, websocket.StatusPolicyViolation, msg)
+	s.c.SendAndClose(b, rpcwire.ClosePolicyViolation, msg)
 }
 
 // handle is the read loop's callback: only register_replica is meaningful from a replica.
@@ -317,12 +293,13 @@ func (n *Node) heartbeat() {
 // and follows the peer. This is the only path that steps a leader down: an epoch carried by a
 // client or a registering replica is a claim anyone on the network can make.
 func (n *Node) probeLoop(ctx context.Context) {
-	u, err := healthURL(n.opts.PeerAddr)
+	u := n.opts.PeerAddr
+	probeFn, closeFn, err := n.grpcProber(u) // Replica.Probe on the peer's client port
 	if err != nil {
 		logger.L.Error("Replica: peer probe disabled", "err", err)
 		return
 	}
-	client := &http.Client{Timeout: time.Second}
+	defer closeFn()
 	t := time.NewTicker(n.opts.HeartbeatInterval)
 	defer t.Stop()
 	for {
@@ -332,7 +309,7 @@ func (n *Node) probeLoop(ctx context.Context) {
 		case <-t.C:
 		case <-n.probeNow: // a client or replica claimed a higher epoch: verify it now
 		}
-		h, err := probe(ctx, client, u, n.opts.ClusterToken)
+		h, err := probeFn(ctx)
 		if err != nil {
 			logger.L.Debug("Replica: peer probe failed", "peer", u, "err", err)
 			continue
@@ -342,29 +319,6 @@ func (n *Node) probeLoop(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// probe GETs the peer's /health with the cluster token (D-031): without it the peer answers only
-// {"status":"ok"}, no role or epoch, and could never fence this node.
-func probe(ctx context.Context, client *http.Client, u, token string) (protocol.Health, error) {
-	var h protocol.Health
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return h, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return h, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return h, errStatus(resp.StatusCode)
-	}
-	err = json.NewDecoder(resp.Body).Decode(&h)
-	return h, err
 }
 
 // SendControl sends one tenancy control frame to every registered replica (leader side), through

@@ -6,23 +6,29 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	pb "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
-// fakeServer speaks enough of protocol/ to drive the reader: open (password, epoch, seq, state),
-// acked set/delete*, broadcasts, dropping and refusing connections. It is not the real server.
+// fakeServer speaks enough of the Cache service to drive the reader: open (password, epoch, seq,
+// state in small chunks), acked set/delete*, broadcasts, dropping and refusing streams. It encodes
+// with protocol/rpcwire, as the server does. It is not the real server.
 type fakeServer struct {
-	t   *testing.T
-	srv *httptest.Server
+	t     *testing.T
+	ln    net.Listener
+	chunk int // state chunk size in bytes: small, so every open exercises the assembler
 
 	mu       sync.Mutex
 	password string
@@ -30,36 +36,52 @@ type fakeServer struct {
 	seq      uint64
 	state    map[string]json.RawMessage
 	expires  map[string]int64
-	refuse   bool // answer 503 to every upgrade
-	attempts int  // upgrade requests seen
-	conns    map[*websocket.Conn]struct{}
+	refuse   bool // fail every stream at once (UNAVAILABLE)
+	attempts int  // streams started
+	conns    map[*fakeConn]struct{}
 	reqs     []protocol.Request
+	keys     []string      // the bearer of every stream
 	setErr   string        // non-empty: every set is refused with this error
 	setTTLms int64         // expires_in_ms on a set ack
 	silent   bool          // read writes, never answer them
 	gate     chan struct{} // non-nil: delete* replies wait until it is closed
 	openErr  string        // non-empty: every open is refused with this error ...
-	openCode int           // ... then closed with this code (0 = dropped)
+	openCode int           // ... then the stream ends with this close code's status (0 = dropped)
 }
+
+// fakeConn is one stream: frames go out on send, in order, from the stream's own goroutine; end
+// ends the stream with a status (nil = a normal end).
+type fakeConn struct {
+	send chan *pb.ServerMsg
+	end  chan error
+	once sync.Once
+}
+
+func (c *fakeConn) finish(err error) { c.once.Do(func() { c.end <- err }) }
 
 func newFakeServer(t *testing.T) *fakeServer {
 	t.Helper()
 	f := &fakeServer{
-		t: t, password: "pw", epoch: 1,
+		t: t, password: "pw", epoch: 1, chunk: 512,
 		state: map[string]json.RawMessage{}, expires: map[string]int64{},
-		conns: map[*websocket.Conn]struct{}{},
+		conns: map[*fakeConn]struct{}{},
 	}
-	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ln = ln
+	srv := grpc.NewServer()
+	pb.RegisterCacheServer(srv, &fakeCache{f: f})
+	go srv.Serve(ln)
 	t.Cleanup(func() {
 		f.dropAll()
-		f.srv.Close()
+		srv.Stop()
 	})
 	return f
 }
 
-func (f *fakeServer) addr() string {
-	return "ws" + strings.TrimPrefix(f.srv.URL, "http") + protocol.PathWS
-}
+func (f *fakeServer) addr() string { return f.ln.Addr().String() }
 
 func (f *fakeServer) do(fn func(f *fakeServer)) {
 	f.mu.Lock()
@@ -76,69 +98,110 @@ func (f *fakeServer) put(key, value string, ttlMS int64) {
 	})
 }
 
-func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+type fakeCache struct {
+	pb.UnimplementedCacheServer
+	f *fakeServer
+}
+
+func (fc *fakeCache) Session(stream grpc.BidiStreamingServer[pb.ClientMsg, pb.ServerMsg]) error {
+	f := fc.f
+	md, _ := metadata.FromIncomingContext(stream.Context())
 	f.mu.Lock()
 	f.attempts++
+	f.keys = append(f.keys, rpcwire.BearerFromMetadata(md))
 	refuse := f.refuse
 	f.mu.Unlock()
 	if refuse {
-		http.Error(w, "down", http.StatusServiceUnavailable)
-		return
+		return status.Error(codes.Unavailable, "down")
 	}
-	c, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		return
-	}
-	c.SetReadLimit(64 << 20)
+	c := &fakeConn{send: make(chan *pb.ServerMsg, 1<<14), end: make(chan error, 1)}
 	f.do(func(f *fakeServer) { f.conns[c] = struct{}{} })
-	defer func() {
-		f.do(func(f *fakeServer) { delete(f.conns, c) })
-		_ = c.CloseNow()
+	defer f.do(func(f *fakeServer) { delete(f.conns, c) })
+
+	ctx := stream.Context()
+	go func() {
+		for {
+			m, err := stream.Recv()
+			if err != nil {
+				c.finish(nil)
+				return
+			}
+			req, err := rpcwire.ClientRequest(m, rpcwire.BearerFromMetadata(md))
+			if err != nil {
+				c.finish(status.Error(codes.InvalidArgument, err.Error()))
+				return
+			}
+			f.do(func(f *fakeServer) { f.reqs = append(f.reqs, req) })
+			if !f.serve(ctx, c, req) {
+				return
+			}
+		}
 	}()
-	ctx := r.Context()
 	for {
-		_, data, err := c.Read(ctx)
-		if err != nil {
-			return
-		}
-		var req protocol.Request
-		if err := json.Unmarshal(data, &req); err != nil {
-			return
-		}
-		f.do(func(f *fakeServer) { f.reqs = append(f.reqs, req) })
-		if !f.serve(ctx, c, req) {
-			return
+		select {
+		case m := <-c.send:
+			if err := stream.Send(m); err != nil {
+				return err
+			}
+		case err := <-c.end:
+			for { // what was sent before the end goes first: one order
+				select {
+				case m := <-c.send:
+					if stream.Send(m) != nil {
+						return err
+					}
+					continue
+				default:
+				}
+				return err
+			}
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }
 
-func (f *fakeServer) write(ctx context.Context, c *websocket.Conn, v any) {
+func (f *fakeServer) write(c *fakeConn, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		f.t.Errorf("fake: encode: %v", err)
 		return
 	}
-	wctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	_ = c.Write(wctx, websocket.MessageText, data)
+	msgs, err := rpcwire.ServerMsgs(data, "s", f.chunk)
+	if err != nil {
+		f.t.Errorf("fake: %s: %v", data, err)
+		return
+	}
+	for _, m := range msgs {
+		select {
+		case c.send <- m:
+		default: // a stalled fake stream: drop, as a kicked one would
+		}
+	}
 }
 
-func (f *fakeServer) serve(ctx context.Context, c *websocket.Conn, req protocol.Request) bool {
+// dropped is how the fake ends a stream abruptly (UNAVAILABLE, no close code).
+func dropped() error { return status.Error(codes.Unavailable, "dropped") }
+
+func (f *fakeServer) serve(ctx context.Context, c *fakeConn, req protocol.Request) bool {
 	switch req.Action {
 	case protocol.ActionOpen:
 		f.mu.Lock()
 		if f.openErr != "" {
 			e, code := f.openErr, f.openCode
 			f.mu.Unlock()
-			f.write(ctx, c, protocol.Response{ID: req.ID, Error: e})
+			f.write(c, protocol.Response{ID: req.ID, Error: e})
 			if code != 0 {
-				_ = c.Close(websocket.StatusCode(code), e)
+				c.finish(rpcwire.CloseStatus(code, e))
+			} else {
+				c.finish(dropped())
 			}
 			return false
 		}
 		if req.Password != f.password {
 			f.mu.Unlock()
-			f.write(ctx, c, protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword})
+			f.write(c, protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword})
+			c.finish(dropped())
 			return false
 		}
 		reply := protocol.Response{Success: true, ID: req.ID, Sheet: req.Sheet, ProtocolVersion: protocol.Version, Epoch: f.epoch, Seq: f.seq}
@@ -150,8 +213,8 @@ func (f *fakeServer) serve(ctx context.Context, c *websocket.Conn, req protocol.
 			st.ExpiresInMS[k] = v
 		}
 		f.mu.Unlock()
-		f.write(ctx, c, reply)
-		f.write(ctx, c, st)
+		f.write(c, reply)
+		f.write(c, st)
 		return true
 
 	case protocol.ActionSet:
@@ -163,14 +226,14 @@ func (f *fakeServer) serve(ctx context.Context, c *websocket.Conn, req protocol.
 		if f.setErr != "" {
 			e := f.setErr
 			f.mu.Unlock()
-			f.write(ctx, c, protocol.Response{ID: req.ID, Error: e})
+			f.write(c, protocol.Response{ID: req.ID, Error: e})
 			return true
 		}
 		f.state[req.Key] = req.Value
 		f.seq++
 		reply := protocol.Response{Success: true, ID: req.ID, Key: req.Key, Seq: f.seq, ExpiresInMS: f.setTTLms}
 		f.mu.Unlock()
-		f.write(ctx, c, reply)
+		f.write(c, reply)
 		return true
 
 	case protocol.ActionDelete, protocol.ActionDeletePrefix, protocol.ActionDeleteSuffix:
@@ -207,52 +270,37 @@ func (f *fakeServer) serve(ctx context.Context, c *websocket.Conn, req protocol.
 		f.seq++
 		reply := protocol.Response{Success: true, ID: req.ID, Key: req.Key, Deleted: n, Seq: f.seq}
 		f.mu.Unlock()
-		f.write(ctx, c, reply)
+		f.write(c, reply)
 		return true
 	}
-	f.write(ctx, c, protocol.Response{ID: req.ID, Error: protocol.ErrMsgUnknownAction})
+	f.write(c, protocol.Response{ID: req.ID, Error: protocol.ErrMsgUnknownAction})
 	return true
 }
 
-// broadcast sends v to every open connection.
-func (f *fakeServer) broadcast(v any) {
+func (f *fakeServer) each(fn func(c *fakeConn)) {
 	f.mu.Lock()
-	conns := make([]*websocket.Conn, 0, len(f.conns))
+	conns := make([]*fakeConn, 0, len(f.conns))
 	for c := range f.conns {
 		conns = append(conns, c)
 	}
 	f.mu.Unlock()
 	for _, c := range conns {
-		f.write(context.Background(), c, v)
+		fn(c)
 	}
 }
 
-func (f *fakeServer) dropAll() {
-	f.mu.Lock()
-	conns := make([]*websocket.Conn, 0, len(f.conns))
-	for c := range f.conns {
-		conns = append(conns, c)
-	}
-	f.mu.Unlock()
-	for _, c := range conns {
-		_ = c.CloseNow()
-	}
-}
+// broadcast sends v to every open stream.
+func (f *fakeServer) broadcast(v any) { f.each(func(c *fakeConn) { f.write(c, v) }) }
 
-// closeAll closes every open connection with an application close code (D-030).
+// dropAll ends every stream abruptly (UNAVAILABLE, no close code).
+func (f *fakeServer) dropAll() { f.each(func(c *fakeConn) { c.finish(dropped()) }) }
+
+// closeAll ends every stream with a close code's status (D-030 codes are terminal).
 func (f *fakeServer) closeAll(code int, reason string) {
-	f.mu.Lock()
-	conns := make([]*websocket.Conn, 0, len(f.conns))
-	for c := range f.conns {
-		conns = append(conns, c)
-	}
-	f.mu.Unlock()
-	for _, c := range conns {
-		_ = c.Close(websocket.StatusCode(code), reason)
-	}
+	f.each(func(c *fakeConn) { c.finish(rpcwire.CloseStatus(code, reason)) })
 }
 
-// setDown refuses (and drops) connections while down.
+// setDown refuses (and drops) streams while down.
 func (f *fakeServer) setDown(down bool) {
 	f.do(func(f *fakeServer) { f.refuse = down })
 	if down {

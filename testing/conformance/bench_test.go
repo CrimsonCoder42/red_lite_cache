@@ -1,8 +1,9 @@
 // Covers: backendAdvo cache layer
 package conformance
 
-// B1 (D-037): the profile sweep DeletePrefix("<root>:patient:<uuid>") over corpus-shaped keys,
-// first/last-segment index alone vs that index plus the patient-head index. It imports
+// B1 (D-037, then D-044): the profile sweep DeletePrefix("<root>:patient:<uuid>") over
+// corpus-shaped keys, through the store's index (the ordered Groups since D-044; before it, the
+// first/last-segment index alone vs that index plus the patient-head index). It imports
 // internal/cache directly: internal/ is importable from anywhere inside this module and
 // testing/conformance is in the module; only this benchmark does it (every C test uses the public
 // reader). The keys are keycorpus.go's real shapes (b1Keys below).
@@ -72,8 +73,9 @@ var b1Variants = []struct {
 	name string
 	new  func() *cache.Store
 }{
-	{"index=segment", cache.NewWithoutHeadIndex},
-	{"index=head", cache.New},
+	// D-044 replaced the segment and head indexes (D-037) with one ordered index; the two old
+	// variants are recorded in doc/ordered_index_build_2026-11-11/out against this one.
+	{"index=ordered", cache.New},
 }
 
 func b1Store(newStore func() *cache.Store, keys []string) *cache.Store {

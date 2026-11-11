@@ -392,6 +392,10 @@ func (s *Sheet) kickAllLocked(reason string) int {
 	return n
 }
 
+// StoreStats is the sheet's store counts alone (D-040; the leak suite subtracts a known residue
+// sheet by sheet). It takes only the store's read lock.
+func (s *Sheet) StoreStats() cache.Stats { return s.store.Stats() }
+
 // stats returns the collaborator count, the sweep-log length and the store's counts, under mu.
 func (s *Sheet) stats() (collabs, logEntries int, st cache.Stats) {
 	s.mu.Lock()

@@ -1,4 +1,4 @@
-package ws
+package rpc
 
 import (
 	"context"
@@ -6,12 +6,12 @@ import (
 	"errors"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/lock"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 // client is one connection's routing state. Only the connection's read goroutine touches it
@@ -56,17 +56,12 @@ func (s *client) route(req protocol.Request) *failure {
 	if req.Action == protocol.ActionOpen {
 		return s.open(req)
 	}
-	if req.Action == protocol.ActionRegisterReplica {
-		return &failure{msg: protocol.ErrMsgUseReplicaPath}
-	}
 	if s.sheet == nil {
 		return &failure{msg: protocol.ErrMsgMustOpen}
 	}
 	switch req.Action {
 	case protocol.ActionGet:
 		return s.get(req)
-	case protocol.ActionDump:
-		return &failure{msg: protocol.ErrMsgDumpMoved}
 	case protocol.ActionSet, protocol.ActionSetNull, protocol.ActionDelete,
 		protocol.ActionDeletePrefix, protocol.ActionDeleteSuffix, protocol.ActionLock, protocol.ActionUnlock:
 		if f := s.gate(req); f != nil {
@@ -260,7 +255,7 @@ func (s *client) end(err error) {
 	}
 	s.endSession(err)
 	if n := s.h.locks.ReleaseAll(s.c.ID()); n > 0 {
-		s.c.log.Info("Lock: released on disconnect", "locks", n)
+		s.c.Log().Info("Lock: released on disconnect", "locks", n)
 	}
 }
 
@@ -269,7 +264,7 @@ func (s *client) refuse(req protocol.Request, f failure) {
 	s.log(req, f)
 	resp := protocol.Response{ID: req.ID, Error: f.msg, Key: f.key}
 	if f.closeAfter {
-		s.c.SendAndClose(s.encode(resp), websocket.StatusGoingAway, f.msg)
+		s.c.SendAndClose(s.encode(resp), rpcwire.CloseGoingAway, f.msg)
 	} else {
 		s.reply(resp)
 	}
@@ -284,10 +279,10 @@ func (s *client) log(req protocol.Request, f failure) {
 		attrs = append(attrs, "err", f.err)
 	}
 	if f.expected {
-		s.c.log.Debug("WS: action refused", attrs...)
+		s.c.Log().Debug("RPC: action refused", attrs...)
 		return
 	}
-	s.c.log.Warn("WS: action failed", attrs...)
+	s.c.Log().Warn("RPC: action failed", attrs...)
 }
 
 func (s *client) sheetName(req protocol.Request) string {
@@ -309,7 +304,7 @@ func (s *client) reply(resp protocol.Response) {
 func (s *client) encode(resp protocol.Response) []byte {
 	b, err := json.Marshal(resp)
 	if err != nil {
-		s.c.log.Error("WS: reply encode failed", "err", err)
+		s.c.Log().Error("RPC: reply encode failed", "err", err)
 		b, _ = json.Marshal(protocol.Response{ID: resp.ID, Error: protocol.ErrMsgInternal})
 	}
 	return b

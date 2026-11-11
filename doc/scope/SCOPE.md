@@ -5,7 +5,7 @@
 > **One embeddable cache client, one leader, zero stale reads across every backend instance.**
 
 `backendAdvo` runs on more than one host and each host kept its own in-memory copy. `advo_cache`
-solved that with a WebSocket leader and a reader library. This module is its successor, built as a
+solved that with a WebSocket leader and a reader library. This module is its successor (on a gRPC wire since S10, D-048), built as a
 proper Go package a consumer can `go get` and pin, with the defects the first version shipped
 fixed on purpose (see Already built → Known defects) and persistence added.
 
@@ -44,13 +44,13 @@ shape from. Status is this repo's status.
 | K6 | Full-state sync is one monolithic frame | `ws/handler.go` | snapshot_sheet per sheet | integration `TestSnapshotThenStream` |
 | K7 | Replica message types duplicated between server and reader | `replica/replica.go`, `reader/reader.go` | `protocol/` package | `protocol` `TestV1CompatibilityFieldNames` (one definition; the hook rejects untyped messages) |
 | K8 | 150-line how-to printed to stdout on every boot | `main.go:95-260` | `logger.Banner`, `doc/protocol/wire.md` | binary run in bootstrap report (one `Config: redlite starting` line) — NO TEST |
-| K9 | Server writes to a conn from many goroutines, no mutex → gorilla concurrent-write panic | `sheet/sheet.go:123,145`, `ws/handler.go:264,501,579,620,654` | per-conn send queue / D-011 | integration `TestEdgeConcurrentWritersSeq` (-race); `internal/ws` `TestConnQueueBoundAndKick` |
+| K9 | Server writes to a conn from many goroutines, no mutex → gorilla concurrent-write panic | `sheet/sheet.go:123,145`, `ws/handler.go:264,501,579,620,654` | per-conn send queue / D-011 | integration `TestEdgeConcurrentWritersSeq` (-race); `internal/rpc` `TestConnQueueBoundAndKick`, `TestGRPCSlowReader` |
 | K10 | No ordering guarantee between collaborators | `ws/handler.go:284-306` | per-sheet mutex (D-014) | integration `TestEdgeConcurrentWritersSeq`; `internal/sheet` `TestOrderConcurrentApply`, `TestJoinOrderUnderLoad` |
 | K11 | Promotion without fencing: old leader never steps down, no epoch → split-brain | `replica/client.go:243-294` | D-012 | integration `TestFencingStepDown`, `TestFencingByReaderEpoch`, `TestEdgeStaleEpoch`; `reader` `TestEpochRefusedFailsOver` |
 | K12 | Promoted replica's sheets have no password; first opener sets it (tenant takeover) | `sheet/sheet.go:66-78` | hashes replicate | integration `TestReplicaLoop` (wrong password refused after promotion); `internal/sheet` `TestK12RestoreKeepsHash` |
 | K13 | Sheet deleted when the last collaborator disconnects (collides with persistence) | `ws/handler.go:160-164` | D-013 | integration `TestEdgeSheetSurvivesLastLeave`; `internal/sheet` `TestK13LeaveKeepsSheet` |
 | K14 | Any client can create any sheet with any password | `sheet/manager.go:27-64` | registry + admin API (S6) | integration `TestAutocreateOffRegistryPath`, `TestEdgeNoAutocreate`; `internal/sheet` `TestK14Autocreate` |
-| K15 | No read limit, ping/pong, deadlines or backpressure | `ws/handler.go:64-70` | S2 | integration `TestEdgeOversizedFrame`, `TestEdgeSlowConsumerKicked`; `internal/ws` `TestConnPingFailureCloses` |
+| K15 | No read limit, ping/pong, deadlines or backpressure | `ws/handler.go:64-70` | S2; S10 (gRPC receive limit, keepalive) | integration `TestEdgeOversizedFrame`, `TestEdgeSlowConsumerKicked`; `internal/rpc` `TestConnPingFailureCloses`, `TestGRPCStatusCodes` |
 | K16 | Zero tests, no `-race`, no benchmarks | repo-wide | every slice ships its loop tests | `bash testing/run.sh` (-race): 159 tests; `make bench` → `doc/bootstrap_2026-10-29/bench_s1.txt` |
 
 Full analysis with the pattern comparison: `doc/assessment_2026-10-29.md`.
@@ -68,6 +68,10 @@ Full analysis with the pattern comparison: `doc/assessment_2026-10-29.md`.
 | S6 | `internal/api` — the registry: create sheet/project, issue API keys, export. **Required for multi-project** (K14) | `specs/s6_api.md` | **built 2026-10-29** (bootstrap; import and key revocation in TODO) | S5 |
 | S7 | `backendAdvo` migration: swap `advo_cache/reader` for this reader | `specs/s7_migration.md`, `doc/consumer/backendadvo_migration.md` | **planned 2026-10-29** — evidence built: `testing/conformance` C1–C13 green in both admission modes, `reader/v1compat` (cut-over step 1); the backendAdvo edits are Devin's | S3, tag v0.3.0 |
 | S8 | Tenancy: registration, admission (`api_key`), sessions, suspend/kick/revoke, per-key revoke/rotate, peer auth (`.claude/prompts/tenancy.md`, D-024…D-031) | `specs/s6_api.md`, `doc/tenancy_2026-10-29/` | **built 2026-10-29**; DB paths (NOTIFY, audit rows) SKIPPED without `REDLITE_TEST_DATABASE_URL` | S6, migration 000002 |
+| PS | <!-- project_sheets_2026-11-11 --> Project sign-in, sheets per project, connection pool, project sequence, multi-sheet `clear`, wire v2 | `specs/s8_project_sheets.md`, `doc/project_sheets_2026-11-11/` | **spec draft 2026-11-11**; not built; 9 open decisions | S8 (tenancy), proposed migration 000003 |
+| OS | <!-- project_sheets_2026-11-11 --> Ordered structures per sheet, server and reader: B+tree groups, expiry wheel, sampled LRU kept, scored collections (design) | `specs/s9_ordered_structures.md`, `doc/project_sheets_2026-11-11/` | **spec draft 2026-11-11**; prototypes measured; 7 open decisions | S1, S3 |
+| OS-b | <!-- ordered_index_build_2026-11-11 --> S9 build: steps 1 (Groups), 2 (server Store), 3 (reader local), 5 (expiry wheel); decisions 1–6 → D-044/D-045/D-046 | `specs/s9_ordered_structures.md`, `doc/ordered_index_build_2026-11-11/` | **built 2026-11-11**; steps 4, 6, 7 not built (4 ships with the new wire, 6 with project sheets, 7 not decided) | OS, D-044–D-046 |
+| S10 | <!-- grpc_build_2026-11-11 --> gRPC wire: `proto/redlite/v1` (Cache, Replica), `internal/rpc` (core behind a Transport), chunked state and snapshots (S9 step 4), admin port, JSON over WebSocket removed (D-048–D-050) | `specs/s10_grpc.md`, `doc/grpc_build_2026-11-11/` | **built 2026-11-11**; WebSocket removed (`internal/ws` → `_delete/`); harness 404 \| 401 \| 1 \| 2 with Postgres (pre-existing jsonb `TestPersistLoop`), smoke PASS | S2, S3, S4, OS-b |
 
 Order: S1 → S2 → S3 → (S4 ∥ S5) → S6 → S7. A thin tracer bullet (open a sheet, set, get from a
 second reader) ships at the end of S3 and is the first tag.

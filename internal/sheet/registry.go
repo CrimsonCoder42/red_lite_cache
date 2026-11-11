@@ -246,10 +246,10 @@ func (r *Registry) Stats() Stats {
 		st.Collaborators += c
 		st.SweepLogEntries += l
 		st.Store.Entries += ss.Entries
-		st.Store.RootBuckets += ss.RootBuckets
-		st.Store.TailBuckets += ss.TailBuckets
-		st.Store.HeadBuckets += ss.HeadBuckets
-		st.Store.HeadRoots += ss.HeadRoots
+		st.Store.ForwardNodes += ss.ForwardNodes
+		st.Store.ReverseNodes += ss.ReverseNodes
+		st.Store.WheelItems += ss.WheelItems
+		st.Store.WheelSlots += ss.WheelSlots
 	}
 	return st
 }

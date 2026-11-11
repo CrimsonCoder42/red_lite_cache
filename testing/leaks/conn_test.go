@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
@@ -167,7 +166,7 @@ func TestL6ConnCloseFreesQueueAndGoroutines(t *testing.T) {
 	Above(t, "locks", srv.App.Locks().Len(), 0)
 
 	for _, c := range conns {
-		c.Conn.CloseNow()
+		c.CloseNow()
 	}
 	st.Drain("closed %d stalled peers", peers)
 
@@ -175,7 +174,7 @@ func TestL6ConnCloseFreesQueueAndGoroutines(t *testing.T) {
 	integration.Eventually(t, "sessions, conns and locks back to the writer's", func() bool {
 		return srv.App.Sessions().Len() == 1 && srv.App.Conns() == 1 && srv.App.Locks().Len() == 0
 	})
-	writer.Conn.CloseNow()
+	writer.CloseNow()
 	integration.Eventually(t, "no session, conn or collaborator left", func() bool {
 		return srv.App.Sessions().Len() == 0 && srv.App.Conns() == 0 && srv.App.Registry().Stats().Collaborators == 0
 	})
@@ -211,8 +210,8 @@ func TestL7SessionKickAndSuspendFree(t *testing.T) {
 				c, _ := integration.OpenRaw(t, srv, name)
 				// A peer that keeps reading (like the reader): it answers pings and the close
 				// handshake, so a kill frees the session at once. A peer that never reads holds a
-				// killed session ~5 s (coder/websocket close-handshake wait) — TestEdgeConnKickMidOpen.
-				c.Conn.CloseRead(context.Background())
+				// killed session until its stream drains — TestEdgeConnKickMidOpen.
+				c.StopReading()
 				conns = append(conns, c)
 			}
 		}
@@ -260,7 +259,7 @@ func TestL7SessionKickAndSuspendFree(t *testing.T) {
 	// tolerance 0: a killed session's server goroutines all exit; the survivors keep exactly theirs
 	Within(t, "goroutines", got, want, 0)
 	for _, c := range conns {
-		c.Conn.CloseNow()
+		c.CloseNow()
 	}
 	integration.Eventually(t, "every session gone after the clients close", func() bool { return srv.App.Sessions().Len() == 0 })
 	AtMost(t, "goroutines after every client closed", integration.WaitGoroutines(t, base, 0), base, 0)
@@ -468,7 +467,7 @@ func TestEdgeConnKickMidOpen(t *testing.T) {
 	base := integration.GoroutineBaseline(t)
 	st.Baseline("goroutines=%d sessions=%d", base, srv.App.Sessions().Len())
 
-	open, _ := json.Marshal(protocol.Request{Action: protocol.ActionOpen, ID: 1, Sheet: names[0], Password: "pw"})
+	open := protocol.Request{Action: protocol.ActionOpen, ID: 1, Sheet: names[0], Password: "pw"}
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	kills := 0
@@ -484,18 +483,16 @@ func TestEdgeConnKickMidOpen(t *testing.T) {
 			}
 		}
 	}()
-	socks := make([]*websocket.Conn, clients)
+	socks := make([]*integration.RawConn, clients)
 	for i := range socks {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), integration.Timeout)
-			defer cancel()
-			c, _, err := websocket.Dial(ctx, srv.WSURL, nil)
+			c, err := integration.TryDial(t, srv.ClientAddr)
 			if err != nil {
 				return
 			}
 			socks[i] = c
-			if c.Write(ctx, websocket.MessageText, open) == nil {
-				c.Read(ctx) // the open reply, or the kick's close
+			if c.TrySend(open) == nil {
+				c.TryNext(integration.Timeout) // the open reply, or the kick's close
 			}
 		})
 	}
@@ -509,8 +506,8 @@ func TestEdgeConnKickMidOpen(t *testing.T) {
 	Above(t, "sessions killed", kills, 0)
 
 	st.Drain("a final KillWhere after every open returned")
-	// The clients stopped reading after one frame, so each killed conn waits out coder/websocket's
-	// 5 s close-handshake read before its socket closes (see L7): the Eventually below covers it.
+	// The clients stopped reading after one frame; a killed stream ends once the server's status is
+	// delivered (see L7): the Eventually below covers it.
 	integration.Eventually(t, "no session, conn or collaborator left", func() bool {
 		return srv.App.Sessions().Len() == 0 && srv.App.Conns() == 0 && srv.App.Registry().Stats().Collaborators == 0
 	})

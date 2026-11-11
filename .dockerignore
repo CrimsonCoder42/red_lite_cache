@@ -1,0 +1,40 @@
+# The build context is source only (doc/docker_ready_2026-11-11). Anything not needed to compile the
+# binary or run the bootstrap stays out — above all secrets: .env never reaches a build stage.
+
+# secrets and local config
+.env
+.env.*
+**/.env
+**/.env.*
+.redlite/
+
+# VCS, editors, agent state
+.git
+.gitignore
+.claude
+.vscode
+.idea
+.air.toml
+.editorconfig
+**/.DS_Store
+
+# build output and scratch
+/redlite
+bin/
+tmp/
+_delete/
+coverage.out
+
+# docs, test logs, examples (not compiled into the binary)
+doc/
+testing/runs/
+testing/_probe/
+examples/
+deploy/
+README.md
+LICENSE
+
+# compose files themselves
+docker-compose.yml
+Dockerfile
+.dockerignore

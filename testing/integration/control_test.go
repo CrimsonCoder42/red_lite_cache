@@ -78,14 +78,14 @@ func TestRevokeProjectMemStore(t *testing.T) {
 	if _, ok := srv.App.Registry().Get(name); ok {
 		t.Fatal("revoked project's sheet still in the registry")
 	}
-	if r, _ := Dial(t, srv.WSURL).Open(name, "pw"); r.Error != protocol.ErrMsgSheetNotFound {
+	if r, _ := Dial(t, srv.ClientAddr).Open(name, "pw"); r.Error != protocol.ErrMsgSheetNotFound {
 		t.Fatalf("open after revoke = %+v", r)
 	}
 	if code := adminDo(t, srv, "POST", "/admin/projects/"+p.ProjectID+"/sheets", p.APIKey, protocol.CreateSheetRequest{Name: "again", Password: "pw"}, nil); code != http.StatusUnauthorized {
 		t.Fatalf("revoked key still works: %d", code)
 	}
 	// Another project is untouched.
-	if r, _ := Dial(t, srv.WSURL).Open(otherSheet, "pw"); !r.Success {
+	if r, _ := Dial(t, srv.ClientAddr).Open(otherSheet, "pw"); !r.Success {
 		t.Fatalf("other project's sheet after revoke = %+v (project %s)", r, other.ProjectID)
 	}
 }
@@ -132,12 +132,12 @@ func revokeAcrossInstances(t *testing.T, listen bool) {
 		t.Fatalf("replica dropped the sheet after %s, want within one tick (%s)", took, tick)
 	}
 	for _, s := range []*Server{leader, rep} {
-		r, _ := Dial(t, s.WSURL).Open(name, "pw")
+		r, _ := Dial(t, s.ClientAddr).Open(name, "pw")
 		if r.Success {
 			t.Fatalf("open on %s after revoke succeeded", s.Cfg.InstanceID)
 		}
 	}
-	if r, _ := Dial(t, leader.WSURL).Open(name, "pw"); r.Error != protocol.ErrMsgSheetNotFound {
+	if r, _ := Dial(t, leader.ClientAddr).Open(name, "pw"); r.Error != protocol.ErrMsgSheetNotFound {
 		t.Fatalf("open on the leader after revoke = %+v", r)
 	}
 }
@@ -169,7 +169,7 @@ func TestAdvisoryElection(t *testing.T) {
 	b := StartReplica(t, a, withPersist(dbURL), advisory)
 
 	// A third node told it is a leader cannot lead while A holds the lock.
-	c := StartLeader(t, withPersist(dbURL), advisory, func(cfg *config.Config) { cfg.InstanceID += "-C"; cfg.PeerAddr = a.WSURL })
+	c := StartLeader(t, withPersist(dbURL), advisory, func(cfg *config.Config) { cfg.InstanceID += "-C"; cfg.PeerAddr = a.ClientAddr })
 	time.Sleep(3 * c.Cfg.HeartbeatTimeout)
 	if c.App.Node().IsLeader() || b.App.Node().IsLeader() {
 		t.Fatalf("a second leader without the lock: b=%v c=%v", b.App.Node().IsLeader(), c.App.Node().IsLeader())

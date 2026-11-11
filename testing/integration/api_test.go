@@ -40,7 +40,7 @@ func TestAutocreateOffRegistryPath(t *testing.T) {
 	srv := StartLeader(t, func(c *config.Config) { c.SheetAutocreate = false; c.AdminKey = admin })
 	name := UniqueSheet(t)
 
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	if r := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: name, Password: "pw"}); r.Error != protocol.ErrMsgSheetNotFound {
 		t.Fatalf("open of an unregistered sheet = %+v, want sheet not found", r)
 	}
@@ -61,7 +61,7 @@ func TestAutocreateOffRegistryPath(t *testing.T) {
 	if err := r.SetWithTTL(context.Background(), "k", map[string]int{"a": 1}, 5); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	bad := Dial(t, srv.WSURL)
+	bad := Dial(t, srv.ClientAddr)
 	if r := bad.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: name, Password: "wrong"}); r.Error != protocol.ErrMsgInvalidPassword {
 		t.Fatalf("wrong password = %+v", r)
 	}

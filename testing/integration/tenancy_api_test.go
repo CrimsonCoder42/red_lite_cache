@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 	"github.com/CrimsonCoder42/red_lite_cache/reader"
@@ -36,7 +34,7 @@ func tnProject(t *testing.T, srv *Server) (protocol.CreateProjectResponse, strin
 // tnOpen dials srv and opens sheet with password "pw" and key; on success it consumes sheet_state.
 func tnOpen(t *testing.T, srv *Server, sheet, key string) (*RawConn, protocol.Response) {
 	t.Helper()
-	c := Dial(t, srv.WSURL)
+	c := Dial(t, srv.ClientAddr)
 	resp := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: sheet, Password: "pw", APIKey: key})
 	if resp.Success {
 		var st protocol.SheetState
@@ -71,7 +69,7 @@ func tnClosedWith(t *testing.T, c *RawConn, code int, d time.Duration) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("socket still open after %s (want close %d)", d, code)
 		}
-		if got := int(websocket.CloseStatus(err)); got != code {
+		if got := CloseStatus(err); got != code {
 			t.Fatalf("close code = %d (%v), want %d", got, err, code)
 		}
 		return

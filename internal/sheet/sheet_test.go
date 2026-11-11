@@ -242,7 +242,7 @@ func TestSweepLoop(t *testing.T) {
 		in   []string
 		out  string
 	}{
-		{"prefix", Mutation{Kind: OpDeletePrefix, Prefix: "t:patient:1:"}, []string{"t:patient:1:a", "t:patient:1:b", "t:patient:1:c"}, "t:patient:2:a"},
+		{"prefix", Mutation{Kind: OpDeletePrefix, Prefix: "t:owner:1:"}, []string{"t:owner:1:a", "t:owner:1:b", "t:owner:1:c"}, "t:owner:2:a"},
 		{"suffix", Mutation{Kind: OpDeleteSuffix, Suffix: ":permissions"}, []string{"t:1:permissions", "t:2:permissions", "u:permissions"}, "t:1:view"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -423,35 +423,35 @@ func TestStaleWrite(t *testing.T) {
 	s := openSheet(t, r, "r6")
 	obs := &recObserver{}
 	r.AddObserver(obs)
-	s.Apply(nil, set("t:patient:1:view", "old", 0), nil)                      // seq 1
-	base := s.Seq()                                                           // reader missed another key at seq 1
-	s.Apply(nil, Mutation{Kind: OpDeletePrefix, Prefix: "t:patient:1:"}, nil) // seq 2
+	s.Apply(nil, set("t:owner:1:view", "old", 0), nil)                      // seq 1
+	base := s.Seq()                                                         // reader missed another key at seq 1
+	s.Apply(nil, Mutation{Kind: OpDeletePrefix, Prefix: "t:owner:1:"}, nil) // seq 2
 
-	stale := set("t:patient:1:list", "fromdb", 0)
+	stale := set("t:owner:1:list", "fromdb", 0)
 	stale.BaseSeq = ptr(base)
 	var replied Result
 	res := s.Apply(newCollab(0), stale, func(r Result) []byte { replied = r; return []byte(`{}`) })
-	if !errors.Is(res.Err, ErrStaleWrite) || s.Seq() != 2 || s.Has("t:patient:1:list") || res.Seq != 2 || !errors.Is(replied.Err, ErrStaleWrite) {
+	if !errors.Is(res.Err, ErrStaleWrite) || s.Seq() != 2 || s.Has("t:owner:1:list") || res.Seq != 2 || !errors.Is(replied.Err, ErrStaleWrite) {
 		t.Fatalf("stale set applied: %+v seq %d", res, s.Seq())
 	}
 	if n := len(obs.all()); n != 2 { // the set and the sweep, not the refused write
 		t.Fatalf("observer saw %d ops from a refused write", n)
 	}
 
-	uncovered := set("t:patient:2:list", "fromdb", 0)
+	uncovered := set("t:owner:2:list", "fromdb", 0)
 	uncovered.BaseSeq = ptr(base)
 	if res := s.Apply(nil, uncovered, nil); res.Err != nil {
 		t.Fatalf("set not covered by the sweep refused: %v", res.Err)
 	}
 
-	fresh := set("t:patient:1:list", "fromdb", 0)
+	fresh := set("t:owner:1:list", "fromdb", 0)
 	fresh.BaseSeq = ptr(2)
-	if res := s.Apply(nil, fresh, nil); res.Err != nil || !s.Has("t:patient:1:list") {
+	if res := s.Apply(nil, fresh, nil); res.Err != nil || !s.Has("t:owner:1:list") {
 		t.Fatalf("fresh set refused: %+v", res)
 	}
 
-	s.Apply(nil, set("t:patient:1:list", "again", 0), nil) // a set also covers its key
-	later := set("t:patient:1:list", "x", 0)
+	s.Apply(nil, set("t:owner:1:list", "again", 0), nil) // a set also covers its key
+	later := set("t:owner:1:list", "x", 0)
 	later.BaseSeq = ptr(4)
 	if res := s.Apply(nil, later, nil); !errors.Is(res.Err, ErrStaleWrite) {
 		t.Fatalf("set older than a later set accepted: %+v", res)
@@ -482,7 +482,7 @@ func TestStaleWrite(t *testing.T) {
 	}
 
 	// nil BaseSeq is the v1 unconditional set.
-	if res := s.Apply(nil, set("t:patient:1:list", "v1", 0), nil); res.Err != nil {
+	if res := s.Apply(nil, set("t:owner:1:list", "v1", 0), nil); res.Err != nil {
 		t.Fatalf("unconditional set refused: %v", res.Err)
 	}
 }

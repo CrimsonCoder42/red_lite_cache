@@ -134,8 +134,9 @@ func TestStatsFreedOnClose(t *testing.T) {
 	if err := r.Delete(bg, "x"); err != nil {
 		t.Fatal(err)
 	}
-	if s := r.Stats(); s != (Stats{Entries: 2, PendingDeletes: 1, MissRecords: 1}) {
-		t.Fatalf("Stats before Close = %+v, want {2 1 1}", s)
+	// k and j: one leaf in each index order (cache.Groups, D-044).
+	if s := r.Stats(); s != (Stats{Entries: 2, PendingDeletes: 1, MissRecords: 1, ForwardNodes: 1, ReverseNodes: 1}) {
+		t.Fatalf("Stats before Close = %+v, want {2 1 1 2 2 0 0}", s)
 	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)

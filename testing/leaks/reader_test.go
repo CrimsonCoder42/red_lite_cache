@@ -131,7 +131,7 @@ func TestL4PendingDeletesBound(t *testing.T) {
 	srv := integration.StartLeader(t)
 	sheet := integration.UniqueSheet(t)
 	p := integration.NewProxy(t, srv.Addr)
-	rd := integration.NewReaderAt(t, "ws://"+p.Addr+protocol.PathWS, "", sheet)
+	rd := integration.NewReaderAt(t, p.Addr, "", sheet)
 	// "other" is never deleted by name: only a replayed delete_prefix "" removes it from the server.
 	if err := rd.Set(context.Background(), "other", 1); err != nil {
 		t.Fatal(err)

@@ -1,5 +1,5 @@
 // Package app wires one red_lite_cache instance: the sheet registry, the lock manager, the node
-// (leader or replica), the /ws handler and the HTTP mux, and runs them under one errgroup.
+// (leader or replica), the gRPC server (Cache, Replica, health) and the admin HTTP mux, and runs them under one errgroup.
 // cmd/redlite and the integration harness both build an instance through New + Run.
 package app
 
@@ -16,17 +16,21 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/api"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/lock"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
+	"github.com/CrimsonCoder42/red_lite_cache/internal/rpc"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/session"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
-	"github.com/CrimsonCoder42/red_lite_cache/internal/ws"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	pb "github.com/CrimsonCoder42/red_lite_cache/protocol/redlitev1"
 )
 
 // App is one instance. Build it with New, mount extra routes with Handle, then Run it once.
@@ -35,9 +39,13 @@ type App struct {
 	instanceID string
 	reg        *sheet.Registry
 	locks      *lock.Manager
-	node       ws.Node
-	ws         *ws.Handler
-	mux        *http.ServeMux
+	node       rpc.Node
+	clients    *rpc.Handler   // every client session, whatever the wire (D-048)
+	mux        *http.ServeMux // the admin port: GET /health and /admin/* (REDLITE_ADMIN_PORT)
+
+	// The client port (D-048): the Cache, Replica and health services.
+	grpcSrv    *grpc.Server
+	grpcHealth *health.Server
 
 	projects api.Store         // projects and keys: Postgres with persistence, else memory
 	tenants  *tenant.Directory // admission + suspension + revoked names (D-024, D-025, D-027)
@@ -54,7 +62,7 @@ func (a *App) Sessions() *session.Registry { return a.sessions }
 func (a *App) Projects() api.Store { return a.projects }
 
 // New builds an instance from cfg: registry, locks, the replica node, persistence (migrate, pool,
-// hydration of a leader before any listener exists), /ws, /replica, /health and /admin/*. ctx
+// hydration of a leader before any listener exists), the gRPC services, and /health and /admin/* on the admin port. ctx
 // bounds that start-up work.
 //
 // after advo_cache/main.go:28-98: the inline wiring and a bare goroutine per background loop became
@@ -87,14 +95,14 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	// ── replica + persist wiring ──
 	// a.node becomes the replica node; with persistence: migrate, pool, hydrate a leader's a.reg
 	// (before any listener exists), the persist writer as an observer; the replica hub as an
-	// observer; protocol.PathReplica mounted. See wire_replica.go.
+	// observer. See wire_replica.go.
 	if err := a.wireReplicaPersist(ctx); err != nil {
 		return nil, err
 	}
 	// ── end replica + persist wiring ──
 
 	// Tenancy (D-024…D-031): the project/key store, the admission directory and the session
-	// registry, built before /ws so the router can admit against them.
+	// registry, built before the Cache service so the router can admit against them.
 	a.projects = api.NewMemStore()
 	if store := a.Store(); store != nil {
 		a.projects = api.NewDBStore(store)
@@ -107,7 +115,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		logger.L.Warn("Replica: cluster token empty, /replica and peer /health unauthenticated", "environment", cfg.Environment)
 	}
 
-	a.ws = ws.NewHandler(a.reg, a.locks, a.node, a.tenants, a.sessions, a.Auditor(), ws.Options{
+	a.clients = rpc.NewHandler(a.reg, a.locks, a.node, a.tenants, a.sessions, a.Auditor(), rpc.Options{
 		SendQueue:     cfg.ConnSendQueue,
 		MaxFrameBytes: cfg.MaxFrameBytes,
 		PingInterval:  cfg.PingInterval,
@@ -115,7 +123,14 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		LockTTL:       cfg.LockTTL,
 	})
 	a.mux.HandleFunc("GET "+protocol.PathHealth, a.health)
-	a.mux.Handle(protocol.PathWS, a.ws)
+	a.grpcSrv, a.grpcHealth = rpc.NewServer(rpc.ServerOptions{
+		ClusterToken: cfg.ClusterToken, MaxRecvBytes: int(cfg.MaxFrameBytes),
+		KeepaliveTime: cfg.PingInterval, KeepaliveWait: cfg.WriteTimeout,
+	})
+	pb.RegisterCacheServer(a.grpcSrv, rpc.NewCacheService(a.clients))
+	pb.RegisterReplicaServer(a.grpcSrv, a.wired().Node.ReplicaService())
+	a.grpcHealth.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	a.grpcHealth.SetServingStatus(pb.Cache_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
 
 	// S6 management API over the same project store.
 	admOpts, err := a.wireTenancy(ctx) // suspended set, last_used toucher, peer (wire_replica.go)
@@ -145,8 +160,8 @@ func (a *App) Config() config.Config { return a.cfg }
 // InstanceID is REDLITE_INSTANCE_ID or the id generated at New.
 func (a *App) InstanceID() string { return a.instanceID }
 
-// Conns is the number of live client connections on /ws.
-func (a *App) Conns() int { return a.ws.Len() }
+// Conns is the number of live client sessions (Cache.Session streams).
+func (a *App) Conns() int { return a.clients.Len() }
 
 func (a *App) role() string {
 	if a.node.IsLeader() {
@@ -172,7 +187,7 @@ func (a *App) health(w http.ResponseWriter, r *http.Request) {
 }
 
 // QueuedFrames is the number of frames waiting in every client connection's send queue.
-func (a *App) QueuedFrames() int { return a.ws.QueuedFrames() }
+func (a *App) QueuedFrames() int { return a.clients.QueuedFrames() }
 
 // Stats is this node's sizes (D-040): counts only, never keys or values. /health carries it in
 // development; the leak suite reads it.
@@ -181,10 +196,12 @@ func (a *App) Stats() *protocol.HealthStats {
 	ts := a.tenants.Stats()
 	st := &protocol.HealthStats{
 		Sheets: rs.Sheets, Collaborators: rs.Collaborators, Entries: rs.Store.Entries,
-		RootBuckets: rs.Store.RootBuckets, TailBuckets: rs.Store.TailBuckets, HeadBuckets: rs.Store.HeadBuckets,
-		SweepLogEntries: rs.SweepLogEntries, Conns: a.ws.Len(), Sessions: a.sessions.Len(),
+		// The segment buckets these fields named are gone (D-044); the JSON fields stay until
+		// protocol/ renames them, carrying the ordered index's node counts. head_buckets is always 0.
+		RootBuckets: rs.Store.ForwardNodes, TailBuckets: rs.Store.ReverseNodes,
+		SweepLogEntries: rs.SweepLogEntries, Conns: a.clients.Len(), Sessions: a.sessions.Len(),
 		LocksHeld: a.locks.Stats().Held, Suspended: ts.Suspended, RevokedNames: ts.RevokedNames, DeadKeys: ts.DeadKeys,
-		Goroutines: runtime.NumGoroutine(),
+		Goroutines: runtime.NumGoroutine(), Panics: a.clients.Panics(),
 	}
 	if wr := a.Writer(); wr != nil {
 		ps := wr.Stats()
@@ -200,15 +217,32 @@ func (a *App) Stats() *protocol.HealthStats {
 // after code-heim go_61_err_group (doc/reference/codeheim_patterns.md § Tier 2): one
 // errgroup.WithContext owns every goroutine; the first error cancels the rest. Replaces
 // advo_cache/main.go's bare goroutines and ListenAndServe with no shutdown.
-func (a *App) Run(ctx context.Context, ln net.Listener) error {
-	srv := &http.Server{Handler: a.mux, ReadHeaderTimeout: 10 * time.Second}
+func (a *App) Run(ctx context.Context, ln, adminLn net.Listener) error { // adminLn nil = listen on REDLITE_ADMIN_PORT
+	if adminLn == nil {
+		l, err := net.Listen("tcp", a.cfg.AdminPort)
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("app: listen admin %s: %w", a.cfg.AdminPort, err)
+		}
+		adminLn = l
+	}
+	adminSrv := &http.Server{Handler: a.mux, ReadHeaderTimeout: 10 * time.Second}
 	g, gctx := errgroup.WithContext(ctx)
 
+	serveHTTP := func(srv *http.Server, l net.Listener, what string) error {
+		logger.L.Info("App: listening", "addr", l.Addr().String(), "serves", what, "role", a.role())
+		if err := srv.Serve(l); !errors.Is(err, http.ErrServerClosed) {
+			logger.L.Error("App: listener closed", "addr", l.Addr().String(), "err", err)
+			return fmt.Errorf("app: serve %s: %w", l.Addr(), err)
+		}
+		return nil
+	}
+	g.Go(func() error { return serveHTTP(adminSrv, adminLn, "admin") })
 	g.Go(func() error {
-		logger.L.Info("WS: listening", "addr", ln.Addr().String(), "role", a.role())
-		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-			logger.L.Error("WS: listener closed", "addr", ln.Addr().String(), "err", err)
-			return fmt.Errorf("app: serve %s: %w", ln.Addr(), err)
+		logger.L.Info("App: listening", "addr", ln.Addr().String(), "serves", "grpc", "role", a.role())
+		if err := a.grpcSrv.Serve(ln); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			logger.L.Error("App: grpc listener closed", "addr", ln.Addr().String(), "err", err)
+			return fmt.Errorf("app: serve grpc %s: %w", ln.Addr(), err)
 		}
 		return nil
 	})
@@ -225,10 +259,19 @@ func (a *App) Run(ctx context.Context, ln net.Listener) error {
 		<-gctx.Done()
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), a.cfg.ShutdownTimeout)
 		defer cancel()
-		err := srv.Shutdown(sctx) // closes the listener; hijacked sockets are not waited for
-		a.ws.CloseAll("server shutting down")
-		if werr := a.ws.Wait(sctx); werr != nil {
-			logger.L.Warn("WS: shutdown wait timed out", "conns", a.ws.Len())
+		err := adminSrv.Shutdown(sctx)
+		a.clients.CloseAll("server shutting down")
+		if werr := a.clients.Wait(sctx); werr != nil {
+			logger.L.Warn("App: shutdown wait timed out", "conns", a.clients.Len())
+		}
+		a.grpcHealth.Shutdown()
+		stopped := make(chan struct{})
+		go func() { a.grpcSrv.GracefulStop(); close(stopped) }() // waits for replica streams too
+		select {
+		case <-stopped:
+		case <-sctx.Done():
+			a.grpcSrv.Stop()
+			<-stopped
 		}
 		a.connsClosed() // only now: ops applied while clients disconnected reach the persist writer
 

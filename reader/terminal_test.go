@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 // D-030: a server close with 4001/4002/4003 is terminal — LastError is the matching sentinel within
@@ -82,8 +81,8 @@ func TestNonTerminalCloseReconnects(t *testing.T) {
 	f := newFakeServer(t)
 	r := mustNew(t, testConfig(f.addr()))
 	for i, drop := range []func(){
-		func() { f.closeAll(int(websocket.StatusNormalClosure), "bye") },
-		func() { f.closeAll(int(websocket.StatusGoingAway), "leader stepped down") },
+		func() { f.closeAll(rpcwire.CloseNormal, "bye") },
+		func() { f.closeAll(rpcwire.CloseGoingAway, "leader stepped down") },
 		f.dropAll,
 	} {
 		opens := len(f.requests(protocol.ActionOpen))
@@ -117,7 +116,7 @@ func TestOpenSuspendedTerminal(t *testing.T) {
 func TestOpenNotAuthorized(t *testing.T) {
 	f := newFakeServer(t)
 	f.do(func(f *fakeServer) {
-		f.openErr, f.openCode = protocol.ErrMsgNotAuthorized, int(websocket.StatusPolicyViolation)
+		f.openErr, f.openCode = protocol.ErrMsgNotAuthorized, rpcwire.ClosePolicyViolation
 	})
 	var logs bytes.Buffer
 	cfg := testConfig(f.addr())

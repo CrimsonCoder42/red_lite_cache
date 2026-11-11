@@ -1,12 +1,11 @@
-package ws
+package rpc
 
 import (
 	"context"
-	"net/http"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/lock"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
@@ -34,12 +33,14 @@ type Options struct {
 	LockTTL       time.Duration // REDLITE_LOCK_TTL: a lock with lock_ttl 0/absent
 }
 
-// Handler serves client WebSockets on protocol.PathWS: one Conn and one read loop per socket, every
-// frame routed by its action (router.go). It tracks live connections so CloseAll can kick them.
+// Handler serves client sessions over a Transport (the gRPC Cache service, grpc.go): one Conn and
+// one read loop per session,
+// every frame routed by its action (router.go). It tracks live connections so CloseAll can kick
+// them.
 //
 // after advo_cache/ws/handler.go:76-134 (Handler, ServeWS): the replica map and leader flag moved
-// out (Node, internal/replica), sync.Map of clients became a map + Mutex of Conns, and the
-// allow-all-origins upgrader became websocket.Accept's default origin policy.
+// out (Node, internal/replica), sync.Map of clients became a map + Mutex of Conns, and the socket
+// became a Transport (D-048).
 type Handler struct {
 	reg      *sheet.Registry
 	locks    *lock.Manager
@@ -54,9 +55,11 @@ type Handler struct {
 	closed bool
 	reason string
 	wg     sync.WaitGroup
+
+	panics atomic.Uint64 // panics recovered on client connections (ConnOptions.Panics)
 }
 
-// NewHandler builds the /ws handler. tenants decides every open (nil = password mode, nothing
+// NewHandler builds the session handler behind the Cache service. tenants decides every open (nil = password mode, nothing
 // suspended); every admitted connection is a session in sessions (nil = a private registry) and its
 // open and close are recorded through audit (nil = tenant.NopAuditor).
 func NewHandler(reg *sheet.Registry, locks *lock.Manager, node Node, tenants *tenant.Directory,
@@ -74,32 +77,42 @@ func NewHandler(reg *sheet.Registry, locks *lock.Manager, node Node, tenants *te
 		opts: opts, conns: make(map[uint64]*Conn)}
 }
 
-// ServeHTTP upgrades the request and serves the socket until it closes.
-//
-// Origin: websocket.Accept's default policy accepts a request with no Origin header (every backend
-// client: Go's dialer sends none) and one whose Origin host equals the request Host; a browser page
-// from another origin is refused with 403. No OriginPatterns are configured.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	wsc, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		logger.L.Warn("WS: upgrade failed", "remote", r.RemoteAddr, "err", err)
-		return
-	}
-	wsc.SetReadLimit(h.opts.MaxFrameBytes)
-	c := NewConn(wsc, ConnOptions{
+// Serve runs one client session on t until it ends. ctx bounds admission's key lookup and the
+// session (its end aborts the transport). After CloseAll the session is refused at once.
+func (h *Handler) Serve(ctx context.Context, t Transport, remote string) {
+	c := NewConn(t, ConnOptions{
 		SendQueue: h.opts.SendQueue, PingInterval: h.opts.PingInterval,
-		WriteTimeout: h.opts.WriteTimeout, Remote: r.RemoteAddr,
+		WriteTimeout: h.opts.WriteTimeout, Remote: remote, Panics: &h.panics,
 	})
 	if !h.track(c) {
-		wsc.Close(websocket.StatusGoingAway, clip(h.reason))
+		t.Close(1001, clip(h.reason))
+		t.Abort()
 		return
 	}
 	defer h.untrack(c)
-	s := &client{ctx: r.Context(), h: h, c: c}
-	c.log.Debug("WS: connected", "remote", r.RemoteAddr)
-	err = c.Run(r.Context(), s.handle)
+	s := &client{ctx: ctx, h: h, c: c}
+	c.log.Debug("RPC: connected", "remote", remote)
+	err := c.Run(ctx, s.handle)
 	s.end(err)
-	c.log.Debug("WS: disconnected", "remote", r.RemoteAddr, "status", int(websocket.CloseStatus(err)))
+	c.log.Debug("RPC: disconnected", "remote", remote, "status", closeStatus(err))
+}
+
+// CloseError is a transport read error that carries the close code the connection ended with
+// (the code this side closed the stream with).
+type CloseError struct {
+	Code int
+	Err  error
+}
+
+func (e *CloseError) Error() string { return e.Err.Error() }
+func (e *CloseError) Unwrap() error { return e.Err }
+
+// closeStatus is the close code err carries, -1 when the connection ended without one.
+func closeStatus(err error) int {
+	if ce, ok := errors.AsType[*CloseError](err); ok {
+		return ce.Code
+	}
+	return -1
 }
 
 func (h *Handler) track(c *Conn) bool {
@@ -119,6 +132,10 @@ func (h *Handler) untrack(c *Conn) {
 	h.mu.Unlock()
 	h.wg.Done()
 }
+
+// Panics is how many panics were recovered on client connections since the handler was built (a
+// count, D-040). Nonzero means a bug that only a log line would otherwise show.
+func (h *Handler) Panics() uint64 { return h.panics.Load() }
 
 // Len is the number of live connections.
 func (h *Handler) Len() int {
@@ -151,7 +168,7 @@ func (h *Handler) CloseAll(reason string) {
 	for _, c := range conns {
 		c.Kick(reason)
 	}
-	logger.L.Info("WS: closed all", "conns", len(conns), "reason", reason)
+	logger.L.Info("RPC: closed all", "conns", len(conns), "reason", reason)
 }
 
 // KickAll kicks every live connection with reason but keeps accepting new ones (step-down: clients
@@ -166,10 +183,10 @@ func (h *Handler) KickAll(reason string) {
 	for _, c := range conns {
 		c.Kick(reason)
 	}
-	logger.L.Info("WS: kicked all", "conns", len(conns), "reason", reason)
+	logger.L.Info("RPC: kicked all", "conns", len(conns), "reason", reason)
 }
 
-// Wait blocks until every connection's ServeHTTP has returned, or ctx is done; it then returns
+// Wait blocks until every connection's Serve has returned, or ctx is done; it then returns
 // ctx.Err(). Call it after CloseAll.
 func (h *Handler) Wait(ctx context.Context) error {
 	t := time.NewTicker(10 * time.Millisecond)

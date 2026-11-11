@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 )
 
@@ -32,7 +30,7 @@ func TestLockLoop(t *testing.T) {
 	if r := b.Do(lockReq("L", 0)); r.Success || r.Error != protocol.ErrMsgLockHeld || r.Key != "L" {
 		t.Fatalf("B lock while A holds = %+v, want %q with key", r, protocol.ErrMsgLockHeld)
 	}
-	a.Conn.Close(websocket.StatusNormalClosure, "bye")
+	a.CloseNormal()
 	Eventually(t, "B acquires L after A disconnects", func() bool { return b.Do(lockReq("L", 0)).Success })
 
 	// lock_ttl is SECONDS: A2's 1s lock expires and B takes it; A2's unlock is then refused

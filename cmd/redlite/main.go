@@ -48,5 +48,5 @@ func run() error {
 		return fmt.Errorf("redlite: listen %s: %w", cfg.Port, err)
 	}
 	logger.Banner(cfg.Role, ln.Addr().String(), cfg.LeaderAddr, a.InstanceID())
-	return a.Run(ctx, ln)
+	return a.Run(ctx, ln, nil) // the admin port (REDLITE_ADMIN_PORT) is opened by Run
 }

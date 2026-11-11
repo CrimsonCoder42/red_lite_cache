@@ -37,7 +37,7 @@ func newV1(t *testing.T, addr, sheet string, mods ...func(*v1compat.Config)) *v1
 func TestC12V1CompatSurface(t *testing.T) {
 	srv := integration.StartLeader(t)
 	sheet := integration.UniqueSheet(t)
-	rs := []*v1compat.Reader{newV1(t, srv.WSURL, sheet), newV1(t, srv.WSURL, sheet), newV1(t, srv.WSURL, sheet)}
+	rs := []*v1compat.Reader{newV1(t, srv.ClientAddr, sheet), newV1(t, srv.ClientAddr, sheet), newV1(t, srv.ClientAddr, sheet)}
 	w, r2, r3 := rs[0], rs[1], rs[2]
 	ctx := context.Background()
 	for i, r := range rs {
@@ -164,8 +164,8 @@ func TestC12V1CompatSurface(t *testing.T) {
 	})
 
 	t.Run("CurrentServer and CacheSize approximations", func(t *testing.T) {
-		if got := w.CurrentServer(); got != srv.WSURL {
-			t.Fatalf("CurrentServer = %q, want the configured LeaderAddr %q", got, srv.WSURL)
+		if got := w.CurrentServer(); got != srv.ClientAddr {
+			t.Fatalf("CurrentServer = %q, want the configured LeaderAddr %q", got, srv.ClientAddr)
 		}
 		if got := w.CacheSize(); got != -1 {
 			t.Fatalf("CacheSize = %d, want -1 (unknown)", got)
@@ -173,7 +173,7 @@ func TestC12V1CompatSurface(t *testing.T) {
 	})
 
 	t.Run("wrong password is ErrAuthFailed as in v1", func(t *testing.T) {
-		_, err := v1compat.New(v1compat.Config{LeaderAddr: srv.WSURL, Sheet: sheet, Password: "wrong"})
+		_, err := v1compat.New(v1compat.Config{LeaderAddr: srv.ClientAddr, Sheet: sheet, Password: "wrong"})
 		if !errors.Is(err, v1compat.ErrAuthFailed) || !errors.Is(err, reader.ErrAuthFailed) {
 			t.Fatalf("New with a wrong password = %v, want ErrAuthFailed", err)
 		}
@@ -212,7 +212,7 @@ func TestC12V1CompatSurface(t *testing.T) {
 // queued and return nil (v1: ErrNotConnected, dropped), reads miss.
 func TestC12V1NewAgainstNothing(t *testing.T) {
 	ln := integration.Listen(t)
-	addr := "ws://" + ln.Addr().String() + protocol.PathWS
+	addr := ln.Addr().String()
 	ln.Close() // nothing listens: every dial is refused
 	start := time.Now()
 	r := newV1(t, addr, integration.UniqueSheet(t))
@@ -267,7 +267,7 @@ func TestC12V1MaxReconnectAttemptsIgnored(t *testing.T) {
 	newDone := make(chan made, 1)
 	go func() {
 		r, err := v1compat.New(v1compat.Config{
-			LeaderAddr: "ws://" + hostport + protocol.PathWS, Sheet: sheet, Password: "pw",
+			LeaderAddr: hostport, Sheet: sheet, Password: "pw",
 			MaxReconnectAttempts: 1, ReconnectDelay: 10 * time.Millisecond,
 		})
 		newDone <- made{r, err}
@@ -292,7 +292,7 @@ func TestC12V1MaxReconnectAttemptsIgnored(t *testing.T) {
 	r := m.r
 	t.Cleanup(func() { r.Close() })
 	integration.Eventually(t, "reader connected after refused attempts", r.IsConnected)
-	w := newV1(t, srv.WSURL, sheet)
+	w := newV1(t, srv.ClientAddr, sheet)
 	if err := w.Set(context.Background(), "after", "x"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}

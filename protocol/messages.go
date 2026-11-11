@@ -2,12 +2,9 @@ package protocol
 
 import "encoding/json"
 
-// Paths. Clients speak on PathWS; a replica speaks to its leader on PathReplica (D-010).
-const (
-	PathWS      = "/ws"
-	PathReplica = "/replica"
-	PathHealth  = "/health"
-)
+// PathHealth is GET /health on the admin port (REDLITE_ADMIN_PORT, D-049). The client and replica
+// wire is gRPC (proto/redlite/v1, D-048); /ws and /replica were retired with WebSocket.
+const PathHealth = "/health"
 
 // Actions (client → server, Request.Action).
 const (
@@ -18,7 +15,6 @@ const (
 	ActionDelete          = "delete"
 	ActionDeletePrefix    = "delete_prefix"
 	ActionDeleteSuffix    = "delete_suffix"
-	ActionDump            = "dump"
 	ActionLock            = "lock"
 	ActionUnlock          = "unlock"
 	ActionRegisterReplica = "register_replica"
@@ -66,8 +62,6 @@ const (
 	ErrMsgStaleEpoch       = "stale epoch" // new: the request carries a higher epoch than this server (D-012)
 	ErrMsgNotLeader        = "not leader"  // new: this instance is a replica; connect to the leader
 	ErrMsgSheetFull        = "sheet full"  // new: REDLITE_CACHE_MAX_KEYS_PER_SHEET reached
-	ErrMsgUseReplicaPath   = "register_replica moved to " + PathReplica
-	ErrMsgDumpMoved        = "dump moved to GET /admin/sheets/{id}/export"
 	ErrMsgInternal         = "internal error"
 	// ErrMsgNotAuthorized is new (D-024): every admission refusal — missing key, a key of another
 	// project, a revoked key, an unknown sheet in key mode — answers this one string, so a client
@@ -76,7 +70,7 @@ const (
 	ErrMsgSuspended     = "suspended" // new (D-027): open of a suspended project; the socket closes 4001
 )
 
-// Request is every client → server frame, and the replica's register frame on PathReplica. It is a
+// Request is every client → server frame, and the replica's register frame on Replica/Follow. It is a
 // union: Action names which fields apply (doc/protocol/wire.md). One struct keeps one definition of
 // each field and lets the server decode a frame in a single pass.
 type Request struct {
@@ -255,6 +249,7 @@ type HealthStats struct {
 	PersistHeld     int    `json:"persist_held"`
 	PersistDropped  uint64 `json:"persist_dropped"`
 	Goroutines      int    `json:"goroutines"`
+	Panics          uint64 `json:"panics"` // panics recovered on client connections since boot
 }
 
 // Close codes (new, D-030): application codes in the 4000–4999 range RFC 6455 reserves for

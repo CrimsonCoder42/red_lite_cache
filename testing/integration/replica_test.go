@@ -42,7 +42,7 @@ func TestReplicaLoop(t *testing.T) {
 	leader := StartLeader(t)
 	rep := StartReplica(t, leader)
 	name := UniqueSheet(t)
-	r := NewReaderAt(t, leader.WSURL, rep.WSURL, name)
+	r := NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, name)
 	ctx := t.Context()
 
 	for k, v := range map[string]int{"a": 1, "b": 2, "user:1": 3, "user:2": 4, "x:tok": 5} {
@@ -91,11 +91,11 @@ func TestReplicaLoop(t *testing.T) {
 	}
 
 	// K12: the bcrypt hash travelled with the sheet; a wrong password is refused.
-	c := Dial(t, rep.WSURL)
+	c := Dial(t, rep.ClientAddr)
 	if resp, _ := c.Open(name, "wrong"); resp.Success || resp.Error != protocol.ErrMsgInvalidPassword {
 		t.Fatalf("wrong password on promoted replica = %+v", resp)
 	}
-	if resp, _ := Dial(t, rep.WSURL).Open(name, "pw"); !resp.Success || resp.Epoch != 2 {
+	if resp, _ := Dial(t, rep.ClientAddr).Open(name, "pw"); !resp.Success || resp.Epoch != 2 {
 		t.Fatalf("right password on promoted replica = %+v", resp)
 	}
 }
@@ -105,7 +105,7 @@ func TestReplicaLoop(t *testing.T) {
 func TestReplicaRefusesOpenBeforePromotion(t *testing.T) {
 	leader := StartLeader(t)
 	rep := StartReplica(t, leader)
-	c := Dial(t, rep.WSURL)
+	c := Dial(t, rep.ClientAddr)
 	if r := c.Do(protocol.Request{Action: protocol.ActionOpen, Sheet: UniqueSheet(t), Password: "pw"}); r.Error != protocol.ErrMsgNotLeader {
 		t.Fatalf("open on a following replica = %+v", r)
 	}
@@ -175,7 +175,7 @@ func TestDuplicateRegisterReplica(t *testing.T) {
 	}
 	reg := protocol.Request{Action: protocol.ActionRegisterReplica, InstanceID: "dup", StartedAt: time.Now().UTC().Format(time.RFC3339)}
 
-	first := Dial(t, leader.ReplicaURL)
+	first := DialReplica(t, leader)
 	if r := first.Do(reg); !r.Success || r.Epoch != 1 {
 		t.Fatalf("register = %+v", r)
 	}
@@ -196,7 +196,7 @@ func TestDuplicateRegisterReplica(t *testing.T) {
 		t.Fatalf("replicas = %d, want 1", n)
 	}
 
-	second := Dial(t, leader.ReplicaURL)
+	second := DialReplica(t, leader)
 	if r := second.Do(reg); !r.Success {
 		t.Fatalf("register from a new conn = %+v", r)
 	}
@@ -210,7 +210,7 @@ func TestDuplicateRegisterReplica(t *testing.T) {
 
 	// A register carrying a higher epoch is refused, but an unverified claim never fences the
 	// leader (only the peer probe does; this leader has no peer): it keeps leading at epoch 1.
-	third := Dial(t, leader.ReplicaURL)
+	third := DialReplica(t, leader)
 	higher := reg
 	higher.InstanceID, higher.Epoch = "newer", 7
 	if r := third.Do(higher); r.Error != protocol.ErrMsgStaleEpoch {
@@ -234,13 +234,13 @@ func startPair(t *testing.T) *pair {
 	t.Helper()
 	lnB := Listen(t)
 	toB := NewProxy(t, lnB.Addr().String())
-	a := StartLeader(t, func(c *config.Config) { c.PeerAddr = "ws://" + toB.Addr })
+	a := StartLeader(t, func(c *config.Config) { c.PeerAddr = toB.Addr })
 	toA := NewProxy(t, a.Addr)
 	cfg := TestConfig(t)
 	cfg.Role = "replica"
 	cfg.InstanceID += "-B"
-	cfg.LeaderAddr = "ws://" + toA.Addr + protocol.PathReplica
-	cfg.PeerAddr = "ws://" + toA.Addr
+	cfg.LeaderAddr = toA.Addr
+	cfg.PeerAddr = toA.Addr
 	b := StartOn(t, lnB, cfg)
 	Eventually(t, "B registered with A", func() bool { return a.App.Node().Replicas() == 1 })
 	p := &pair{A: a, B: b, toA: toA, toB: toB, sheetName: UniqueSheet(t)}
@@ -314,7 +314,7 @@ func TestFencingByReaderEpoch(t *testing.T) {
 	p := startPair(t)
 	p.partition(t)
 	toB := NewProxy(t, p.B.Addr) // the reader's own path to B
-	r := NewReaderAt(t, "ws://"+toB.Addr+protocol.PathWS, p.A.WSURL, p.sheetName)
+	r := NewReaderAt(t, toB.Addr, p.A.ClientAddr, p.sheetName)
 	Eventually(t, "reader on B", r.IsConnected)
 
 	toB.Block() // the reader loses B and tries A, which answers with the stale epoch 1

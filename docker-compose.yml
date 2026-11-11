@@ -1,58 +1,113 @@
-# Local three-service run: postgres + leader + replica. Development only — production placement
-# (NUC leader, DO replica over Tailscale) lives in advomedix-v2/deploy.
-# Ports 8095/8096 (never 8081/8082: a local advo_cache may be there). Postgres on host 5433.
+# red_lite_cache — development stack (doc/docker_ready_2026-11-11). Production placement lives in
+# advomedix-v2/deploy and is not this file.
+#
+#   docker compose up -d                       postgres + leader + bootstrap (a ready dev project)
+#   docker compose --profile cluster up -d     … plus the replica on 8096
+#   docker compose down                        stop; data kept (volume redlite_pg)
+#   docker compose down -v                     stop and wipe the data
+#
+# The bootstrap writes ./.redlite/dev-project.env (mode 600, gitignored): project id, API key, sheet,
+# sheet password, address. Every value below has a default, so no .env is needed; a .env (or the
+# environment) overrides any ${VAR:-default}. Ports bind to 127.0.0.1 only. 8095/8096 are the gRPC
+# client ports (D-048), 8097/8098 the admin ports (GET /health, /admin/*); never 8081/8082 (a local
+# advo_cache may be there).
+#
+# DEV ONLY: REDLITE_ADMIN_KEY and REDLITE_CLUSTER_TOKEN default to public development values and
+# postgres uses postgres/postgres. Set real values in .env before exposing anything.
+
+x-redlite-env: &redlite-env
+  REDLITE_ENVIRONMENT: development
+  REDLITE_ADMISSION: ${REDLITE_ADMISSION:-key} # D-024: the API key admits; "password" for a v1 reader
+  REDLITE_PERSIST_ENABLED: "true"
+  REDLITE_PERSIST_DATABASE_URL: postgres://postgres:${REDLITE_PG_PASSWORD:-postgres}@postgres:5432/redlite?sslmode=disable
+  REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key} # DEV ONLY default
+  REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # DEV ONLY default; same on both nodes (D-031)
+  REDLITE_LOG_LEVEL: ${REDLITE_LOG_LEVEL:-info}
+  REDLITE_ADMIN_PORT: ":8097" # admin REST + GET /health; the client port speaks gRPC (D-048)
+
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: redlite_db
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres # dev only
+      POSTGRES_PASSWORD: ${REDLITE_PG_PASSWORD:-postgres} # DEV ONLY default
       POSTGRES_DB: redlite
-    ports: ["5433:5432"]
-    volumes: ["redlite_pg:/var/lib/postgresql/data"]
+    # 5434, not 5433: a native PostgreSQL often holds 5433 on developer machines (Devin, 2026-11-11).
+    ports: ["127.0.0.1:${REDLITE_HOST_PG_PORT:-5434}:5432"]
+    volumes:
+      - redlite_pg:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro # creates redlite_test on a fresh volume
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d redlite"]
-      interval: 3s
+      interval: 2s
       timeout: 3s
-      retries: 20
+      retries: 30
+    restart: unless-stopped
 
   leader:
-    build: .
-    container_name: redlite-leader
-    ports: ["8095:8095"]
+    build: { context: ., target: runtime }
+    image: redlite:${REDLITE_IMAGE_TAG:-dev}
+    ports:
+      - "127.0.0.1:${REDLITE_HOST_LEADER_PORT:-8095}:8095"
+      - "127.0.0.1:${REDLITE_HOST_LEADER_ADMIN_PORT:-8097}:8097"
     environment:
+      <<: *redlite-env
       REDLITE_PORT: ":8095"
       REDLITE_ROLE: leader
       REDLITE_INSTANCE_ID: leader
-      REDLITE_PEER_ADDRESS: ws://replica:8096
-      REDLITE_ENVIRONMENT: development
-      REDLITE_PERSIST_ENABLED: "true"
-      REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
-      REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
-      REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # D-031: same value on both nodes
+      REDLITE_PEER_ADDRESS: replica:8096 # gRPC Replica.Probe; an absent replica is only a Debug line
     depends_on:
       postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8097/health >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      start_period: 5s
+      retries: 30
     restart: unless-stopped
 
-  replica:
-    build: .
-    container_name: redlite-replica
-    ports: ["8096:8096"]
+  bootstrap:
+    build: { context: ., target: bootstrap }
+    image: redlite-bootstrap:${REDLITE_IMAGE_TAG:-dev}
+    # Writes into the host's ./.redlite: on Linux run as the host user (make up sets these from id -u /
+    # id -g); Docker Desktop on macOS maps any uid to the host user.
+    user: "${REDLITE_BOOTSTRAP_UID:-10001}:${REDLITE_BOOTSTRAP_GID:-10001}"
     environment:
+      REDLITE_BOOTSTRAP_URL: http://leader:8097 # the admin port
+      REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key} # DEV ONLY default
+      REDLITE_DEV_PROJECT: ${REDLITE_DEV_PROJECT:-dev}
+      REDLITE_DEV_SHEET: ${REDLITE_DEV_SHEET:-} # empty = the project name (sheet names are unique per node)
+      REDLITE_DEV_ADDR: 127.0.0.1:${REDLITE_HOST_LEADER_PORT:-8095} # gRPC client address
+      REDLITE_BOOTSTRAP_HOST_PATH: ${REDLITE_BOOTSTRAP_DIR:-./.redlite}/dev-project.env
+    volumes:
+      - ${REDLITE_BOOTSTRAP_DIR:-./.redlite}:/out
+    depends_on:
+      leader: { condition: service_healthy }
+    restart: "no"
+
+  replica:
+    profiles: ["cluster"]
+    build: { context: ., target: runtime }
+    image: redlite:${REDLITE_IMAGE_TAG:-dev}
+    ports:
+      - "127.0.0.1:${REDLITE_HOST_REPLICA_PORT:-8096}:8096"
+      - "127.0.0.1:${REDLITE_HOST_REPLICA_ADMIN_PORT:-8098}:8097"
+    environment:
+      <<: *redlite-env
       REDLITE_PORT: ":8096"
       REDLITE_ROLE: replica
       REDLITE_INSTANCE_ID: replica
-      REDLITE_LEADER_ADDRESS: ws://leader:8095/replica
-      REDLITE_PEER_ADDRESS: ws://leader:8095
-      REDLITE_ENVIRONMENT: development
+      REDLITE_LEADER_ADDRESS: leader:8095 # gRPC Replica.Follow
+      REDLITE_PEER_ADDRESS: leader:8095
       # Shares the database: only the node that is leader writes to it (gated on role).
-      REDLITE_PERSIST_ENABLED: "true"
-      REDLITE_PERSIST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/redlite?sslmode=disable
-      REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key}
-      REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # D-031: same value on both nodes
     depends_on:
-      leader: { condition: service_started }
+      leader: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8097/health >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      start_period: 5s
+      retries: 30
     restart: unless-stopped
 
 volumes:

@@ -1,5 +1,65 @@
 # Changelog
 
+<!-- grpc_build_2026-11-11 -->
+- 2026-11-11 — **The wire is gRPC; JSON over WebSocket is removed** (`doc/grpc_build_2026-11-11/`, `doc/specs/s10_grpc.md`,
+  D-048, D-049, D-050). Contract `proto/redlite/v1/{cache,replica}.proto` → `protocol/redlitev1` (`make proto`, staleness test);
+  `protocol/rpcwire` converts at the edge. `Cache.Session`: one bidi stream per session, replies and broadcasts in one order,
+  every message names its sheet; sheet states and replica snapshots in sorted ≤ 1 MiB chunks (S9 step 4; 100k keys tested).
+  `Replica.Follow` / `Replica.Probe` with the cluster token as call credentials. Server core moved to `internal/rpc`
+  (Conn, router, admission, Handler behind a `Transport`; abortable sends; stream status + `ErrorDetail` close codes);
+  `internal/ws` → `_delete/`; `github.com/coder/websocket` dropped. Admin REST + `GET /health` on `REDLITE_ADMIN_PORT`
+  (:8097; compose 8097/8098), `grpc.health.v1` on the client port, `REDLITE_PEER_ADMIN_ADDRESS`. Reader/v1compat APIs
+  unchanged; addresses are `host:port` (`ws://` refused); reconnect replay windowed to 64 unacked deletes (fixes a
+  replay ↔ slow-consumer loop). Every suite ran on both wires first (grpc `412 | 407 | 1 | 4`, ws `412 | 409 | 1 | 2`); after
+  removal `404 | 401 | 1 | 2` (the failure is the pre-existing jsonb `TestPersistLoop`), smoke PASS. Benchmarks (medians of 6,
+  WS → gRPC): acked set 84 → 121 µs, broadcast to 30 readers 271 → 506 µs, 100k-key connect 225 → 275 ms (bytes −16 %),
+  stalled peer ended 5.1 s → 58 ms. New tests: `internal/rpc` (bufconn, in-memory transport), reader fake gRPC server,
+  `testing/blackbox` (address + .proto only), `testing/wirebench`.
+
+<!-- docker_ready_2026-11-11 -->
+- 2026-11-11 — `docker compose up -d` (or `make up`) gives a ready cache (`doc/docker_ready_2026-11-11/`, D-047): postgres
+  (127.0.0.1:5434, `redlite_test` created by `docker/postgres/10-create-test-db.sql`), the leader with persistence on and a
+  `/health` healthcheck (127.0.0.1:8095), and a one-shot `bootstrap` (`docker/bootstrap/bootstrap.sh`, Dockerfile target
+  `bootstrap`) that registers a development project and sheet through the admin API and writes
+  `./.redlite/dev-project.env` (mode 600); the replica moved behind `--profile cluster` (127.0.0.1:8096). `.dockerignore`
+  (build context 83.8 MB → 1.02 MB; `.env` never reaches a build stage); Dockerfile on 8095 with a healthcheck; Makefile
+  `up`/`cluster`/`down`/`wipe`/`smoke`/`test-persist`; `testing/compose_smoke.sh` and the gated
+  `testing/compose/compose_test.go` (`REDLITE_COMPOSE_TEST=1`). Harness with the persistence tests running:
+  `389 | 386 | 1 | 2`, 0 DATA RACE (the one failure is pre-existing: `TestPersistLoop`, jsonb re-formats values — TODO).
+
+<!-- ordered_index_build_2026-11-11 -->
+- 2026-11-11 — S9 steps 1, 2, 3, 5 built (`doc/ordered_index_build_2026-11-11/`; D-044, D-045, D-046; wire and
+  `reader/v1compat` unchanged). **Groups** (`internal/cache/groups.go`, `ordered.go`): forward + reversed B+trees,
+  128 keys per node, merge below 32, shared by the server `Store` (`internal/cache/store.go`) and the reader's local
+  map (`reader/local.go`); `internal/cache/index.go` (segment + `patient` head index) moved to `_delete/`. One-match
+  prefix / suffix delete at 100 000 keys 2.31 / 1.86 µs (colon keys) and 1.93 / 2.23 µs (`/` keys), shape-independent
+  (the old index: 1.0–1.2 ms on `/` keys); reader bytes per entry 338.9 → 270.4. **Wheel** (`internal/cache/wheel.go`):
+  expiry filed by second, decided on the wall clock, compacted above 2 × live; the janitor's idle pass at 100 000 keys
+  896.6 µs → 0.79 µs; the reader drops expired entries locally every second (`reader/reader.go` `expireLoop`).
+  `cache.Stats` / `reader.Stats`: bucket counts → `ForwardNodes`, `ReverseNodes`, `WheelItems` (+ `WheelSlots` on the
+  server); `/health` `root_buckets`/`tail_buckets` carry the node counts, `head_buckets` is 0. Harness before
+  `369 | 354 | 0 | 15`, 0 DATA RACE; after: `doc/ordered_index_build_2026-11-11/out/harness_after.txt`.
+
+<!-- reader_optimize_2026-11-10 -->
+- 2026-11-10 — reader local map optimised (D-043; `doc/reader_optimize_2026-11-10/`; reader API, Config and wire
+  unchanged; `reader.Stats` and the development-only `/health` `stats` gain fields). **Panics visible** (S1): a recovered
+  panic is counted — `ws.ConnOptions.Panics`, `ws.Handler.Panics`, `protocol.HealthStats.Panics`, `reader.Stats.Panics` —
+  and every server and reader the integration harness starts fails its test at cleanup when its count is above 0
+  (`integration.CheckNoPanics`). **Reader index** (S2): `internal/cache/index.go` holds the first-segment, last-segment
+  and patient-head index moved unchanged out of `store.go` (the server store embeds it; `store_test.go` untouched);
+  the reader's local map uses it through `cache.Index`, so a one-match prefix / suffix delete at 100 000 entries is
+  953 / 873 ns instead of 1.5 / 1.6 ms (1.30× / 1.31× its cost at 1 000); `reader.Stats` gains `RootBuckets`,
+  `TailBuckets`, `HeadBuckets`. **Sampled LRU** (S3, D-043): slots `{key, access, expires}` in a dense array, 5 uniform
+  draws per eviction, access stored atomically under the read lock at 100 ms resolution, mutex padded to its own cache
+  line. Cost: 94.4 → 338.9 bytes per entry; put on a full map at 100 000 entries +43% vs HEAD. **Load measured** (S4,
+  no default changed): 0 slow-consumer kicks at 50 / 500 / 5 000 writes/s × `REDLITE_CONN_SEND_QUEUE` 256 / 1 024 /
+  4 096 (`testing/load`, `REDLITE_LOAD_TEST=1`). New tests: reader `audit_test.go`, `panics_test.go`, `index_test.go`,
+  `eviction_test.go`; `internal/ws/panics_test.go`; `testing/integration/overflow_test.go`,
+  `testing/leaks/reader_index_test.go` (L13), `testing/stress/`, `testing/load/`. `doc/reference/lru_cache.md`.
+  `bash testing/run.sh`: `358 | 344 | 0 | 14` before; final `369 | 354 | 0 | 15` (14 = persist, no
+  `REDLITE_TEST_DATABASE_URL`; 1 = load, no `REDLITE_LOAD_TEST`), after one run where
+  `internal/persist` `TestRevokeDiscardsHeldBatch` (untouched) timed out once and passed on 3 re-runs.
+
 - 2026-10-29 — leak suite (D-038…D-042; next tag **v0.3.1**: additive `reader.Stats`, no wire change beyond the
   development-only `/health` `"stats"`): `testing/leaks/` L1–L12 + 6 edge cases (BASELINE → FILL → OBSERVE → DRAIN →
   ASSERT); harness `integration.NewClock/WithClock/GoroutineBaseline/WaitGoroutines/HeapAlloc`; `config.Clock`

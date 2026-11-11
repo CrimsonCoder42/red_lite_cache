@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
-	"github.com/CrimsonCoder42/red_lite_cache/protocol"
 	"github.com/CrimsonCoder42/red_lite_cache/reader"
 	"github.com/CrimsonCoder42/red_lite_cache/testing/integration"
 )
@@ -75,7 +74,7 @@ func TestC8DisconnectRetiresDroppedSweeps(t *testing.T) {
 		c := cfStart(t, m)
 		ctx := context.Background()
 		proxy := integration.NewProxy(t, c.srv.Addr)
-		c.st[1] = c.storeAt("ws://" + proxy.Addr + protocol.PathWS)
+		c.st[1] = c.storeAt(proxy.Addr)
 		p := uuid.New()
 		c.db.Put(p, Row{Profile: p, Value: 1})
 		key := ConditionListKey(p, time.Time{}, uuid.Nil, 20) // swept by instance 1
@@ -143,7 +142,7 @@ func TestC9BootWhileCacheDown(t *testing.T) {
 		proxy.Block()
 		const connectTimeout = 300 * time.Millisecond
 		start := time.Now()
-		late := c.storeAt("ws://"+proxy.Addr+protocol.PathWS, func(rc *reader.Config) { rc.ConnectTimeout = connectTimeout })
+		late := c.storeAt(proxy.Addr, func(rc *reader.Config) { rc.ConnectTimeout = connectTimeout })
 		if took := time.Since(start); took > connectTimeout+2*time.Second {
 			t.Fatalf("reader.New took %s with ConnectTimeout %s", took, connectTimeout)
 		}

@@ -21,7 +21,7 @@ type Config struct {
 	LeaderAddr  string // replica: the leader's /replica URL
 	LogLevel    string
 
-	// PeerAddr is the other node's base URL (ws://host:port). A leader probes the peer's /health
+	// PeerAddr is the other node's client port (host:port). A leader probes it (Replica/Probe)
 	// with it and steps down to replica of a peer with a higher epoch (D-012). Empty = no probe.
 	PeerAddr        string
 	InstanceID      string        // empty = generated at boot
@@ -84,6 +84,16 @@ type Config struct {
 	// test harness sets it (testing/integration WithClock).
 	Clock func() time.Time
 	// ── end leak bounds + test clock ──
+
+	// ── gRPC wire (grpc_build_2026-11-11, D-048) ──
+	// AdminPort is where the admin REST API and GET /health listen (REDLITE_ADMIN_PORT, ":8097");
+	// the client port (Port) speaks gRPC.
+	AdminPort string
+	// PeerAdminAddr is the other node's admin base URL (http://host:port) for the admin API's peer
+	// calls (merged session listing, forwarded kills) (REDLITE_PEER_ADMIN_ADDRESS). "" = the peer's
+	// host (REDLITE_PEER_ADDRESS, else a replica's leader address) on this node's admin port.
+	PeerAdminAddr string
+	// ── end gRPC wire ──
 }
 
 // IsProduction reports REDLITE_ENVIRONMENT=production.
@@ -156,6 +166,9 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		Admission:              e.str("REDLITE_ADMISSION", defaultAdmission(e.str("REDLITE_ENVIRONMENT", "development"))),
 		ClusterToken:           e.str("REDLITE_CLUSTER_TOKEN", ""),
 		TenantMemoryMax:        e.num("REDLITE_TENANT_MEMORY_MAX", 10_000), // D-041
+		// gRPC wire (grpc_build_2026-11-11, D-048)
+		AdminPort:     e.str("REDLITE_ADMIN_PORT", ":8097"),
+		PeerAdminAddr: e.str("REDLITE_PEER_ADMIN_ADDRESS", ""),
 	}
 	errs := e.errs
 	if c.Role != "leader" && c.Role != "replica" {

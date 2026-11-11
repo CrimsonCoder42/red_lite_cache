@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"net/http"
 	"sync"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
@@ -23,10 +21,6 @@ var (
 	errUnknownOp   = errors.New("replica: unknown op kind")
 	errStaleLeader = errors.New("replica: stale leader frame")
 )
-
-type errStatus int
-
-func (e errStatus) Error() string { return fmt.Sprintf("replica: peer health status %d", int(e)) }
 
 // Dial backoff while following: full jitter between backoffMin and a cap that doubles to backoffMax.
 const (
@@ -44,7 +38,7 @@ const (
 // with backoff while one monitor promotes on the heartbeat timeout; the timeout is measured from
 // the last frame of any kind, not only heartbeats.
 func (n *Node) follow(ctx context.Context, target string) bool {
-	u, err := replicaURL(target)
+	u, err := grpcTarget(target), error(nil) // the leader's client port, host:port
 	if err != nil {
 		logger.L.Error("Replica: bad leader address", "err", err)
 		<-ctx.Done()
@@ -101,26 +95,22 @@ func (n *Node) follow(ctx context.Context, target string) bool {
 // session runs one connection to the leader until it fails. connected is true once the leader
 // accepted the register.
 func (n *Node) session(ctx context.Context, u string) (connected bool, err error) {
-	dctx, dcancel := context.WithTimeout(ctx, n.opts.HeartbeatTimeout)
-	c, _, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPHeader: bearer(n.opts.ClusterToken)})
-	dcancel()
+	c, err := n.dialLinkGRPC(ctx, u)
 	if err != nil {
-		return false, fmt.Errorf("replica: dial %s: %w", u, err)
+		return false, err
 	}
-	defer c.CloseNow()
-	c.SetReadLimit(n.opts.MaxFrameBytes)
+	defer c.close()
 
-	reg, _ := json.Marshal(protocol.Request{
+	wctx, wcancel := context.WithTimeout(ctx, n.opts.WriteTimeout)
+	err = c.register(wctx, protocol.Request{
 		Action: protocol.ActionRegisterReplica, InstanceID: n.opts.InstanceID,
 		StartedAt: n.startedAt.UTC().Format(time.RFC3339), Epoch: n.Epoch(),
 	})
-	wctx, wcancel := context.WithTimeout(ctx, n.opts.WriteTimeout)
-	err = c.Write(wctx, websocket.MessageText, reg)
 	wcancel()
 	if err != nil {
 		return false, fmt.Errorf("replica: register write: %w", err)
 	}
-	_, data, err := c.Read(ctx)
+	data, err := c.read(ctx)
 	if err != nil {
 		return false, fmt.Errorf("replica: register reply: %w", err)
 	}
@@ -139,18 +129,27 @@ func (n *Node) session(ctx context.Context, u string) (connected bool, err error
 
 	ap := &applier{n: n, inSnapshot: true, seen: map[string]bool{}}
 	for {
-		_, data, err := c.Read(ctx)
+		data, err := c.read(ctx)
 		if err != nil {
 			return true, fmt.Errorf("replica: read: %w", err)
 		}
 		if err := ap.apply(data); err != nil {
 			if errors.Is(err, errStaleLeader) {
-				c.Close(websocket.StatusPolicyViolation, "stale epoch")
+				c.refuse("stale epoch")
 			}
 			return true, err
 		}
 		n.touch() // only a frame that passed the epoch check keeps this replica from promoting
 	}
+}
+
+// link is one follower connection to the leader: the gRPC Replica service (grpcLink, grpc.go).
+// Frames are the JSON frames of package protocol.
+type link interface {
+	register(ctx context.Context, req protocol.Request) error
+	read(ctx context.Context) ([]byte, error) // the next whole frame
+	refuse(reason string)                     // end the link: the leader is stale
+	close()
 }
 
 // checkEpoch drops a leader whose epoch is below ours and adopts a higher one.
@@ -252,14 +251,6 @@ func (a *applier) control(data []byte, typ string) error {
 		a.n.opts.OnControl(f)
 	}
 	return nil
-}
-
-// bearer is the Authorization header carrying the cluster token (D-031); nil when there is none.
-func bearer(token string) http.Header {
-	if token == "" {
-		return nil
-	}
-	return http.Header{"Authorization": {"Bearer " + token}}
 }
 
 // sheet applies snapshot_sheet (identity + whole state) or replicate_sheet (identity only).

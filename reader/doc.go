@@ -1,5 +1,5 @@
 // Package reader is the embeddable client. A consumer imports this package, calls New with a Config,
-// and reads from a local map that the leader keeps in sync over a WebSocket. Reads never touch the
+// and reads from a local map that the leader keeps in sync over one gRPC stream (D-048). Reads never touch the
 // network.
 //
 // Guarantees (doc/purpose.md R1–R10, doc/specs/s3_reader.md):
@@ -13,6 +13,7 @@
 //   - SetWithTTL waits for the server's acknowledgement and returns its failure (R9).
 //   - New does not fail because the cache is down; only a refused password fails it (R10).
 //
-// The package imports only the standard library, protocol/ and github.com/coder/websocket. It has no
+// The package imports only the standard library, protocol/ (with the generated protocol/redlitev1
+// and protocol/rpcwire), internal/cache's ordered index and google.golang.org/grpc. It has no
 // globals, no init and reads no environment; Config is its only input.
 package reader

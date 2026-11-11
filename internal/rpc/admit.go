@@ -1,11 +1,10 @@
-package ws
+package rpc
 
 import (
 	"errors"
 	"strconv"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/CrimsonCoder42/red_lite_cache/internal/logger"
@@ -13,6 +12,7 @@ import (
 	"github.com/CrimsonCoder42/red_lite_cache/internal/sheet"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/tenant"
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 // Admission (D-024, D-025, D-027) and the session lifecycle (D-026) of one connection.
@@ -41,8 +41,8 @@ func (s *client) admitPassword(req protocol.Request) (*sheet.Sheet, *failure) {
 	sh, _, err := s.h.reg.Open(req.Sheet, req.Password)
 	switch {
 	case errors.Is(err, sheet.ErrBadPassword):
-		logger.L.Warn("WS: bad password", "sheet", req.Sheet, "remote", s.c.Remote(), "conn_id", s.c.ID())
-		s.c.SendAndClose(s.encode(protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword}), websocket.StatusPolicyViolation, protocol.ErrMsgInvalidPassword)
+		logger.L.Warn("RPC: bad password", "sheet", req.Sheet, "remote", s.c.Remote(), "conn_id", s.c.ID())
+		s.c.SendAndClose(s.encode(protocol.Response{ID: req.ID, Error: protocol.ErrMsgInvalidPassword}), rpcwire.ClosePolicyViolation, protocol.ErrMsgInvalidPassword)
 		return nil, nil
 	case errors.Is(err, sheet.ErrSheetNotFound):
 		return nil, &failure{msg: protocol.ErrMsgSheetNotFound, err: err, expected: true}
@@ -83,17 +83,17 @@ func (s *client) admitKey(req protocol.Request) (*sheet.Sheet, uuid.UUID, *failu
 func (s *client) refuseAdmission(req protocol.Request, err error, reason string) *failure {
 	var (
 		msg  string
-		code websocket.StatusCode
+		code int
 	)
 	switch {
 	case errors.Is(err, tenant.ErrSuspended):
 		msg, code, reason = protocol.ErrMsgSuspended, protocol.CloseSuspended, "suspended"
 	case errors.Is(err, tenant.ErrNotAuthorized):
-		msg, code = protocol.ErrMsgNotAuthorized, websocket.StatusPolicyViolation
+		msg, code = protocol.ErrMsgNotAuthorized, rpcwire.ClosePolicyViolation
 	default:
 		return &failure{msg: protocol.ErrMsgInternal, err: err}
 	}
-	logger.L.Warn("WS: admission refused", "sheet", req.Sheet, "remote", s.c.Remote(), "reason", reason, "conn_id", s.c.ID())
+	logger.L.Warn("RPC: admission refused", "sheet", req.Sheet, "remote", s.c.Remote(), "reason", reason, "conn_id", s.c.ID())
 	closeReason := msg
 	if code == protocol.CloseSuspended {
 		closeReason = protocol.CloseReasonSuspended
@@ -109,11 +109,11 @@ func (s *client) startSession(sh *sheet.Sheet, keyID uuid.UUID, epoch uint64) *s
 	c := s.c
 	sess := session.New(session.Params{
 		Project: sh.ProjectID(), Sheet: sh.Name(), KeyID: keyID, Remote: c.Remote(), Epoch: epoch,
-		Kill: func(code int, reason string) { c.CloseWith(websocket.StatusCode(code), reason) },
+		Kill: func(code int, reason string) { c.CloseWith(code, reason) },
 	}, time.Now())
-	c.bind(sess)
+	c.Bind(sess)
 	s.h.sessions.Add(sess)
-	logger.L.Info("WS: session opened", "session", sess.ID().String(), "project", sess.Project().String(),
+	logger.L.Info("RPC: session opened", "session", sess.ID().String(), "project", sess.Project().String(),
 		"sheet", sess.Sheet(), "key_id", keyIDString(keyID), "remote", c.Remote(), "conn_id", c.ID())
 	s.h.audit.Audit(s.event(sess, "session_open", nil))
 	return sess
@@ -127,8 +127,8 @@ func (s *client) endSession(err error) {
 		return
 	}
 	s.h.sessions.Remove(sess.ID())
-	status := int(websocket.CloseStatus(err))
-	logger.L.Info("WS: session closed", "session", sess.ID().String(), "project", sess.Project().String(),
+	status := closeStatus(err)
+	logger.L.Info("RPC: session closed", "session", sess.ID().String(), "project", sess.Project().String(),
 		"sheet", sess.Sheet(), "status", status, "conn_id", s.c.ID())
 	s.h.audit.Audit(s.event(sess, "session_close", map[string]string{"status": strconv.Itoa(status)}))
 }

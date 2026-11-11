@@ -72,7 +72,7 @@ func e2eProject(t *testing.T, srv *integration.Server, n int) (string, []string)
 // e2eSet applies n sets on the leader's sheet name (keys `dom:patient:<profile>:v<j>`, profiles
 // cycling over profiles) with ttlMinutes (0 = no expiry; TestConfig's default CacheTTL is used for 0,
 // so callers that want none pass -1 → see e2eNoTTL). Through Sheet.Apply: the real apply, broadcast
-// to the sheet's readers and replication to the replica, without n WebSocket round trips.
+// to the sheet's readers and replication to the replica, without n client round trips.
 func e2eSet(t *testing.T, srv *integration.Server, name string, profiles []uuid.UUID, n int, ttl func(j int) int) {
 	t.Helper()
 	sh, ok := srv.App.Registry().Get(name)
@@ -99,8 +99,7 @@ func e2eProfiles(n int) []uuid.UUID {
 
 // e2eZero reports whether a registry's Stats hold nothing but sheets.
 func e2eZero(st sheet.Stats) bool {
-	return st.Collaborators == 0 && st.SweepLogEntries == 0 && st.Store.Entries == 0 && st.Store.RootBuckets == 0 &&
-		st.Store.TailBuckets == 0 && st.Store.HeadBuckets == 0 && st.Store.HeadRoots == 0
+	return st.Collaborators == 0 && st.SweepLogEntries == 0 && st.Store == (cache.Stats{})
 }
 
 // e2eHeap is the least of three HeapAlloc samples (each after two GCs, 10 ms apart): a single
@@ -119,7 +118,7 @@ func e2eHeap() uint64 {
 // e2eWarm runs every L12 path once on sheet name and drains it back to zero (see the call site).
 func e2eWarm(t *testing.T, leader, rep *integration.Server, clk *integration.Clock, name string) {
 	t.Helper()
-	r := integration.NewReaderAt(t, leader.WSURL, rep.WSURL, name)
+	r := integration.NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, name)
 	for j := range 10 {
 		if err := r.SetWithTTL(t.Context(), fmt.Sprintf("dom:patient:%s:w%d", uuid.Nil, j), j, 1+j%2); err != nil {
 			t.Fatal(err)
@@ -156,16 +155,19 @@ func e2eReplicaKeptOnly(rep *integration.Server, revoked []string) bool {
 	return true
 }
 
-// e2eMinusF1 removes the F-1 residue (the revoked sheets' keys: 2 roots, 2×2 500 tails… one root
-// bucket "dom" per sheet, 25 head buckets per sheet, one tail bucket per key) from a replica's
-// summed store counts, so the rest can be asserted zero.
-func e2eMinusF1(st cache.Stats, revoked []string) cache.Stats {
-	n := len(revoked)
-	st.Entries -= e2eF1Keys
-	st.RootBuckets -= n
-	st.TailBuckets -= e2eF1Keys
-	st.HeadBuckets -= 25 * n
-	st.HeadRoots -= n
+// e2eMinusF1 removes the F-1 residue (the revoked sheets' entries and index nodes, read from those
+// sheets themselves) from a replica's summed store counts, so the rest can be asserted zero.
+func e2eMinusF1(rep *integration.Server, st cache.Stats, revoked []string) cache.Stats {
+	for _, name := range revoked {
+		sh, ok := rep.App.Registry().Get(name)
+		if !ok {
+			continue
+		}
+		rs := sh.StoreStats()
+		st.Entries -= rs.Entries
+		st.ForwardNodes -= rs.ForwardNodes
+		st.ReverseNodes -= rs.ReverseNodes
+	}
 	return st
 }
 
@@ -203,9 +205,9 @@ func TestL12EndToEndBaseline(t *testing.T) {
 
 	// FILL: 3 readers (one per drain path), then 20 000 keys.
 	readers := []*reader.Reader{
-		integration.NewReaderAt(t, leader.WSURL, rep.WSURL, keep[0]),    // TTL
-		integration.NewReaderAt(t, leader.WSURL, rep.WSURL, keep[4]),    // DeletePrefix
-		integration.NewReaderAt(t, leader.WSURL, rep.WSURL, revoked[0]), // revoke
+		integration.NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, keep[0]),    // TTL
+		integration.NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, keep[4]),    // DeletePrefix
+		integration.NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, revoked[0]), // revoke
 	}
 	profiles := e2eProfiles(25)
 	mixed := func(j int) int { return 1 + j%2 } // 1 or 2 minutes
@@ -291,7 +293,7 @@ func TestL12EndToEndBaseline(t *testing.T) {
 
 	integration.Eventually(t, "both registries hold only bare sheets", func() bool {
 		rs := rep.App.Registry().Stats()
-		rs.Store = e2eMinusF1(rs.Store, revoked)
+		rs.Store = e2eMinusF1(rep, rs.Store, revoked)
 		return e2eZero(leader.App.Registry().Stats()) && e2eZero(rs) && e2eReplicaKeptOnly(rep, revoked)
 	})
 	// tolerance 0: every goroutine this test started is a reader's or a connection's.
@@ -359,7 +361,7 @@ func TestL11ReplicaStepDownFrees(t *testing.T) {
 
 	readers := make([]*reader.Reader, 3)
 	for i := range readers {
-		readers[i] = integration.NewReaderAt(t, leader.WSURL, rep.WSURL, name)
+		readers[i] = integration.NewReaderAt(t, leader.ClientAddr, rep.ClientAddr, name)
 	}
 	ctx := t.Context()
 	for j := range 2_000 {
@@ -403,7 +405,9 @@ func TestL11ReplicaStepDownFrees(t *testing.T) {
 
 	integration.Eventually(t, "old leader converged on the new leader's state", func() bool {
 		n, o := rep.App.Registry().Stats(), old.App.Registry().Stats()
-		return o.Sheets == n.Sheets && o.Store == n.Store
+		// Entries, not the whole Stats: index node counts depend on build order (the rejoined node
+		// bulk-loads a snapshot, the new leader grew key by key; D-044), the key sets do not.
+		return o.Sheets == n.Sheets && o.Store.Entries == n.Store.Entries && o.Store.ForwardNodes > 0 == (n.Store.Entries > 0)
 	})
 	n, o, stopped := rep.App.Registry().Stats(), old.App.Registry().Stats(), leader.App.Registry().Stats()
 	steps.Assert("new leader %+v rejoined %+v stopped leader %+v", n, o, stopped)

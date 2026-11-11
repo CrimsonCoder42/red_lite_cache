@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,10 +24,10 @@ const (
 // Options configures a Node. Every duration comes from internal/config.
 type Options struct {
 	Role       string // RoleLeader | RoleReplica at boot (REDLITE_ROLE)
-	LeaderAddr string // replica: the leader, ws://host:port[/replica] (REDLITE_LEADER_ADDRESS)
-	PeerAddr   string // the other node, ws://host:port (REDLITE_PEER_ADDRESS); "" = no probe
-	// ClusterToken is REDLITE_CLUSTER_TOKEN (D-031): required as a Bearer token on /replica and the
-	// peer /health probe, and sent by this node when it dials or probes. "" = no peer auth (dev only).
+	LeaderAddr string // replica: the leader's client port, host:port (REDLITE_LEADER_ADDRESS)
+	PeerAddr   string // the other node's client port, host:port (REDLITE_PEER_ADDRESS); "" = no probe
+	// ClusterToken is REDLITE_CLUSTER_TOKEN (D-031): required as Bearer call credentials on
+	// Replica/Follow and Replica/Probe, and sent by this node when it follows or probes. "" = no peer auth (dev only).
 	ClusterToken string
 	InstanceID   string
 
@@ -43,7 +41,7 @@ type Options struct {
 
 	// Store persists the epoch (cluster_state) when persistence is on; nil = epoch in memory only.
 	Store *db.Store
-	// KickClients kicks every client connection on /ws (ws.Handler.KickAll) at step-down.
+	// KickClients kicks every client session (rpc.Handler.KickAll) at step-down.
 	KickClients func(reason string)
 	// OnPromote runs after this node became leader by promotion, before it serves as leader.
 	// synced is false when no leader snapshot ever reached this node since boot.
@@ -153,7 +151,7 @@ func (n *Node) Role() string {
 // Replicas is the number of registered replica connections (leader side).
 func (n *Node) Replicas() int { return n.hub.len() }
 
-// ObserveEpoch is called by the /ws router when a client request carries an epoch above ours. The
+// ObserveEpoch is called by the session router when a client request carries an epoch above ours. The
 // request is refused (stale epoch) but the claim is not trusted — an unauthenticated frame must not
 // be able to fence a leader — so it only makes the peer probe check now. Without
 // REDLITE_PEER_ADDRESS nothing changes here; readers that saw the higher epoch still refuse this
@@ -314,34 +312,6 @@ func (n *Node) awaitLock(ctx context.Context) {
 	}
 }
 
-// replicaURL turns a leader address into its /replica URL: no path or "/" or "/ws" → /replica.
-func replicaURL(addr string) (string, error) {
-	u, err := url.Parse(addr)
-	if err != nil {
-		return "", fmt.Errorf("replica: leader address %q: %w", addr, err)
-	}
-	if p := strings.TrimSuffix(u.Path, "/"); p == "" || p == protocol.PathWS {
-		u.Path = protocol.PathReplica
-	}
-	return u.String(), nil
-}
-
-// healthURL turns a peer address (ws:// or wss://, any path) into its http(s) /health URL.
-func healthURL(addr string) (string, error) {
-	u, err := url.Parse(addr)
-	if err != nil {
-		return "", fmt.Errorf("replica: peer address %q: %w", addr, err)
-	}
-	switch u.Scheme {
-	case "ws":
-		u.Scheme = "http"
-	case "wss":
-		u.Scheme = "https"
-	}
-	u.Path, u.RawQuery = protocol.PathHealth, ""
-	return u.String(), nil
-}
-
 // hub is the leader's set of replica connections, keyed by connection id, with one connection per
 // instance id. closed is set once by shutdown; after it no handler enters and no connection is
 // added, so wg.Add never runs concurrently with shutdown's wg.Wait.
@@ -352,7 +322,7 @@ type hub struct {
 	wg     sync.WaitGroup // one per ServeHTTP in flight
 }
 
-// enter counts one /replica handler in; false once shutdown started (the handler refuses).
+// enter counts one Follow stream in; false once shutdown started (the handler refuses).
 func (h *hub) enter() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
