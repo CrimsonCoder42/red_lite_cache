@@ -2,9 +2,11 @@
 package reader
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
@@ -64,4 +66,29 @@ func TestGRPCOpenRefusedAndAPIKey(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A value over one chunk (1.1 MiB) arrives alone in its own state chunk and as a broadcast, under
+// the reader's receive limit; a set over the message limit is refused before the wire.
+func TestGRPCValueOverChunk(t *testing.T) {
+	f := newFakeServer(t)
+	f.do(func(f *fakeServer) { f.chunk = rpcwire.DefaultChunkBytes })
+	big := `"` + strings.Repeat("x", 1_153_434) + `"`
+	f.put("a", `1`, 0)
+	f.put("big", big, 0)
+	f.put("c", `3`, 0)
+	r := mustNew(t, testConfig(f.addr()))
+	var got string
+	if !r.Get("big", &got) || len(got) != 1_153_434 || !r.Has("a") || !r.Has("c") {
+		t.Fatalf("state: big %d bytes, a %v, c %v", len(got), r.Has("a"), r.Has("c"))
+	}
+	f.broadcast(protocol.Replicate{Type: protocol.TypeReplicate, Key: "big2", Value: json.RawMessage(big), Seq: 5})
+	waitFor(t, "big2 replicated", func() bool { return r.Has("big2") })
+	err := r.Set(context.Background(), "huge", strings.Repeat("x", rpcwire.DefaultMaxMessageBytes))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("set over the limit = %v, want ErrTooLarge", err)
+	}
+	if n := len(f.requests(protocol.ActionSet)); n != 0 {
+		t.Fatalf("%d sets reached the wire", n)
+	}
 }

@@ -476,3 +476,38 @@ func TestEdgeShutdownMidWrite(t *testing.T) {
 		t.Fatal("no write failed after the server stopped")
 	}
 }
+
+// TestEdgeLargeValue: a value over one state chunk (1.1 MiB, the size a consumer hit) is set with
+// the default REDLITE_MAX_FRAME_BYTES, reaches an open reader as a broadcast, and reaches a later
+// reader in its state, alone in a chunk. A value over the limit is refused at Set (ErrTooLarge)
+// before the wire, and the writer's session goes on.
+func TestEdgeLargeValue(t *testing.T) {
+	srv := StartLeader(t)
+	name := UniqueSheet(t)
+	OpenRaw(t, srv, name)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	big := strings.Repeat("x", 1_153_434) // 1.1 MiB
+	w := NewReader(t, srv, name)
+	early := NewReader(t, srv, name)
+	if err := w.Set(ctx, "big", big); err != nil {
+		t.Fatalf("set 1.1 MiB: %v", err)
+	}
+	for _, r := range []*reader.Reader{early, NewReader(t, srv, name)} { // broadcast, then state
+		deadline := time.Now().Add(5 * time.Second)
+		var got string
+		for !r.Get("big", &got) && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got != big {
+			t.Fatalf("reader got %d bytes, want %d", len(got), len(big))
+		}
+	}
+	err := w.Set(ctx, "huge", strings.Repeat("x", 5<<20))
+	if err == nil || !errors.Is(err, reader.ErrTooLarge) {
+		t.Fatalf("set 5 MiB = %v, want ErrTooLarge", err)
+	}
+	if err := w.Set(ctx, "after", 1); err != nil {
+		t.Fatalf("set after the refusal: %v", err)
+	}
+}

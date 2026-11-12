@@ -36,8 +36,9 @@ cluster:
 down:            # stop; data kept
 	docker compose --profile cluster down
 
-wipe:            # stop and delete the data (volume redlite_pg); .redlite/ must go too: its key is dead
+wipe:            # stop and delete the data (volume redlite_pg) and the key file: its key died with the data
 	docker compose --profile cluster down -v
+	rm -f .redlite/dev-project.env .redlite/.dev-project.env.partial
 
 logs:
 	docker compose --profile cluster logs -f

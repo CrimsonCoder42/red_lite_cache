@@ -1,5 +1,12 @@
 # Changelog
 
+- 2026-11-11 — **Fix: values over 1 MiB ended the session.** The server's default receive limit
+  (`REDLITE_MAX_FRAME_BYTES`) was 1 MiB, so a 1.1 MiB set ended the session `RESOURCE_EXHAUSTED`
+  ("received message larger than max (1176241 vs. 1048576)") and the reader reconnected. The default
+  is now 4 MiB (`rpcwire.DefaultMaxMessageBytes`, 4 × the chunk). The reader refuses a bigger set with
+  `ErrTooLarge` instead of sending it. Compose admission now defaults to `password` (the dev consumer
+  is v1compat), and `make wipe` removes `.redlite/dev-project.env`. Tests: `TestEdgeLargeValue`,
+  reader `TestGRPCValueOverChunk`.
 <!-- grpc_build_2026-11-11 -->
 - 2026-11-11 — **The wire is gRPC; JSON over WebSocket is removed** (`doc/grpc_build_2026-11-11/`, `doc/specs/s10_grpc.md`,
   D-048, D-049, D-050). Contract `proto/redlite/v1/{cache,replica}.proto` → `protocol/redlitev1` (`make proto`, staleness test);

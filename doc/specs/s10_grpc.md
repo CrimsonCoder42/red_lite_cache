@@ -53,7 +53,7 @@ was removed).
 | client port | `REDLITE_PORT` |
 | admin port | `REDLITE_ADMIN_PORT` (default `:8097`) |
 | peer admin base URL | `REDLITE_PEER_ADMIN_ADDRESS` (default: the peer's host on this node's admin port) |
-| receive limit | `REDLITE_MAX_FRAME_BYTES` (client), `REDLITE_REPLICA_MAX_FRAME_BYTES` (replica) |
+| receive limit | `REDLITE_MAX_FRAME_BYTES` (client, default 4 MiB = `rpcwire.DefaultMaxMessageBytes`), `REDLITE_REPLICA_MAX_FRAME_BYTES` (replica); the reader receives up to 64 MiB and refuses a set over 4 MiB (`ErrTooLarge`) |
 | chunk size | `rpcwire.DefaultChunkBytes` = 1 MiB (constant) |
 
 ## Failure behavior

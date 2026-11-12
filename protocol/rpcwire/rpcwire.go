@@ -29,6 +29,15 @@ import (
 // defaultClientMaxReceiveMessageSize), so no message of a large sheet is ever refused.
 const DefaultChunkBytes = 1 << 20
 
+// DefaultMaxMessageBytes is the default receive limit on one message (REDLITE_MAX_FRAME_BYTES on
+// the server, the reader's set ceiling): 4 × a chunk, so a full chunk plus its framing fits with
+// margin, and a value bigger than a chunk travels alone in its own chunk and still fits.
+const DefaultMaxMessageBytes = 4 * DefaultChunkBytes
+
+// MessageHeadroom is what a set reserves under the limit for everything that is not the value
+// (key, sheet, ids, proto framing).
+const MessageHeadroom = 16 << 10
+
 // AuthHeader is the call-metadata key that carries `Bearer <API key>` (Cache) or `Bearer <cluster
 // token>` (Replica).
 const AuthHeader = "authorization"

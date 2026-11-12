@@ -31,6 +31,8 @@ export REDLITE_IMAGE_TAG="smoke" # its own image tags: the developer's redlite:d
 export REDLITE_ADMIN_KEY="smoke-admin-$STAMP-$RANDOM"
 export REDLITE_CLUSTER_TOKEN="smoke-cluster-$STAMP-$RANDOM"
 export REDLITE_PG_PASSWORD="smoke-pg-$STAMP-$RANDOM"
+# `make smoke` exports the developer's settings (the Makefile's -include .env): the stack takes none.
+unset REDLITE_ADMISSION REDLITE_DEV_PROJECT REDLITE_DEV_SHEET REDLITE_LOG_LEVEL
 # Its own (empty) env file: compose never reads the developer's .env for this project, so every
 # value is a default or one of the throwaway values exported above.
 : >"$DIR/smoke.env"

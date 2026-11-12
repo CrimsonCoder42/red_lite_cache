@@ -39,7 +39,7 @@ type Config struct {
 
 	ConnSendQueue        int           // D-014: frames queued per client connection before it is closed
 	ReplicaSendQueue     int           // frames queued per replica connection before it is closed
-	MaxFrameBytes        int64         // read limit on a client frame
+	MaxFrameBytes        int64         // read limit on a client message: 4 MiB = rpcwire.DefaultMaxMessageBytes
 	ReplicaMaxFrameBytes int64         // read limit on a replica stream frame (a snapshot_sheet can be large)
 	PingInterval         time.Duration // keepalive ping on every connection
 	WriteTimeout         time.Duration // deadline for one frame write or ping round trip
@@ -143,7 +143,7 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		SweepLogMax:            e.num("REDLITE_SWEEP_LOG_MAX", 4096),
 		ConnSendQueue:          e.num("REDLITE_CONN_SEND_QUEUE", 256),
 		ReplicaSendQueue:       e.num("REDLITE_REPLICA_SEND_QUEUE", 4096),
-		MaxFrameBytes:          int64(e.num("REDLITE_MAX_FRAME_BYTES", 1<<20)),
+		MaxFrameBytes:          int64(e.num("REDLITE_MAX_FRAME_BYTES", 4<<20)),
 		ReplicaMaxFrameBytes:   int64(e.num("REDLITE_REPLICA_MAX_FRAME_BYTES", 64<<20)),
 		PingInterval:           e.dur("REDLITE_PING_INTERVAL", 15*time.Second),
 		WriteTimeout:           e.dur("REDLITE_WRITE_TIMEOUT", 10*time.Second),

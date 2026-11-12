@@ -41,7 +41,9 @@ highest leader epoch the client has seen (a server with a lower epoch refuses `s
 | (empty / unknown body) | — | `unknown action` (or `must open sheet first`); the stream stays up |
 
 Every body except `open` is refused `must open sheet first` until a sheet is open. A message over
-`REDLITE_MAX_FRAME_BYTES` ends the stream `RESOURCE_EXHAUSTED`. `dump` has no message: it moved to
+`REDLITE_MAX_FRAME_BYTES` (default 4 MiB = 4 × the chunk) ends the stream `RESOURCE_EXHAUSTED`; the
+reader refuses such a set before sending it (`reader.ErrTooLarge`). A value bigger than a chunk
+travels alone in its own state chunk. `dump` has no message: it moved to
 `GET /admin/sheets/{id}/export`.
 
 **ServerMsg** `{id, oneof body}`:

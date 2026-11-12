@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CrimsonCoder42/red_lite_cache/protocol"
+	"github.com/CrimsonCoder42/red_lite_cache/protocol/rpcwire"
 )
 
 // Errors a caller matches with errors.Is. ErrNotConnected, ErrAuthFailed and ErrClosed keep the v1
@@ -25,6 +26,9 @@ var (
 	ErrStale = errors.New("reader: stale write")
 	// ErrTimeout: no acknowledgement within Config.WriteTimeout or the caller's context.
 	ErrTimeout = errors.New("reader: timeout")
+	// ErrTooLarge: a set over the server's message limit (REDLITE_MAX_FRAME_BYTES, default 4 MiB) is
+	// refused here; sent, it would end the session RESOURCE_EXHAUSTED for every other call on it.
+	ErrTooLarge = errors.New("reader: value larger than max message size")
 
 	// Terminal closes (D-030): the server closed the session with an application close code and
 	// the reader stopped for good — no reconnect, every write returns ErrClosed. LastError reports
@@ -317,6 +321,9 @@ func (r *Reader) SetWithTTL(ctx context.Context, key string, value any, ttlMinut
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("reader: set %q: encode: %w", key, err)
+	}
+	if n := len(key) + len(raw); n > rpcwire.DefaultMaxMessageBytes-rpcwire.MessageHeadroom {
+		return fmt.Errorf("reader: set %q: %w (%d vs. %d)", key, ErrTooLarge, n, rpcwire.DefaultMaxMessageBytes-rpcwire.MessageHeadroom)
 	}
 	if !r.connected.Load() {
 		return fmt.Errorf("reader: set %q: %w", key, ErrNotConnected)

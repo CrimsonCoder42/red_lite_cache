@@ -17,7 +17,7 @@
 
 x-redlite-env: &redlite-env
   REDLITE_ENVIRONMENT: development
-  REDLITE_ADMISSION: ${REDLITE_ADMISSION:-key} # D-024: the API key admits; "password" for a v1 reader
+  REDLITE_ADMISSION: ${REDLITE_ADMISSION:-password} # D-024: the dev consumer is v1compat (sheet password); "key" for API-key admission
   REDLITE_PERSIST_ENABLED: "true"
   REDLITE_PERSIST_DATABASE_URL: postgres://postgres:${REDLITE_PG_PASSWORD:-postgres}@postgres:5432/redlite?sslmode=disable
   REDLITE_ADMIN_KEY: ${REDLITE_ADMIN_KEY:-dev-admin-key} # DEV ONLY default
