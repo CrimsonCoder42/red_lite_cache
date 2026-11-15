@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>red_lite_cache admin</title>
+
+    <!-- Inter + Manrope, as the reference admin loads them (its index.html:16-21). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <!--
+      Pre-paint theme guard, copied from the reference admin's index.html:24-36: runs before the first
+      paint so a dark session does not flash light while React boots. Kept in sync with
+      src/features/theme/themeStore.ts (the storage key "theme" and the class "dark"). The theme mode
+      is the only thing this portal keeps in localStorage.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("theme");
+          var dark =
+            stored === "dark" ||
+            ((stored === null || stored === "auto") &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.classList.toggle("light", !dark);
+        } catch (e) {
+          /* Private mode denies localStorage. Fall through to the light default. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

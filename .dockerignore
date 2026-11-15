@@ -18,6 +18,10 @@
 .editorconfig
 **/.DS_Store
 
+# the portal's installed packages and build output: the portal stage installs and builds its own
+portal/node_modules/
+portal/dist/
+
 # build output and scratch
 /redlite
 bin/

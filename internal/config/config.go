@@ -94,6 +94,15 @@ type Config struct {
 	// host (REDLITE_PEER_ADDRESS, else a replica's leader address) on this node's admin port.
 	PeerAdminAddr string
 	// ── end gRPC wire ──
+
+	// ── admin portal (admin_portal_2026-11-12, S11) ──
+	// AdminTrustedProxy is D6 (REDLITE_ADMIN_TRUSTED_PROXY, false): when RemoteAddr is loopback (a
+	// local TLS proxy), the last X-Forwarded-For hop is the client IP for rate limits and audit.
+	AdminTrustedProxy bool
+	// PortalDir is D4 (REDLITE_PORTAL_DIR, ""): the built portal the admin port will serve. Read
+	// only; serving it is the portal wave's.
+	PortalDir string
+	// ── end admin portal ──
 }
 
 // IsProduction reports REDLITE_ENVIRONMENT=production.
@@ -169,6 +178,9 @@ func build(lookup func(string) (string, bool)) (Config, error) {
 		// gRPC wire (grpc_build_2026-11-11, D-048)
 		AdminPort:     e.str("REDLITE_ADMIN_PORT", ":8097"),
 		PeerAdminAddr: e.str("REDLITE_PEER_ADMIN_ADDRESS", ""),
+		// admin portal (admin_portal_2026-11-12, S11)
+		AdminTrustedProxy: e.boolean("REDLITE_ADMIN_TRUSTED_PROXY", false),
+		PortalDir:         e.str("REDLITE_PORTAL_DIR", ""),
 	}
 	errs := e.errs
 	if c.Role != "leader" && c.Role != "replica" {

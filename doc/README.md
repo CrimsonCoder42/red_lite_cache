@@ -18,6 +18,7 @@
 | `reference/` | Outside sources distilled and checked: claims table, defects, what we take and what we replace. `reference/README.md` is the index |
 | `handoffs/` | Mid-bug notes; folded and marked stale by `/cleanup` |
 | `bootstrap_2026-10-29/` | The bootstrap work folder: the agents' brief and contracts, S1 benchmark output, the proposed `.env.example` and `000002_audit` migration waiting for Devin |
+| `admin_portal_2026-11-12/` | Admin portal: PLAN (research), the backend wave's PROGRESS/REPORT/WALKTHROUGH (curl), the 000003 migration as proposed |
 | `release.md` | How consumers get it: tagging, `go get`, pinning in `backendAdvo` |
 
 Read before you code. Update when you change. A doc that disagrees with the code is a bug.

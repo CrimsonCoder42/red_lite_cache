@@ -1,6 +1,7 @@
 package api
 
-// Tenancy routes (D-027 suspend, D-028 keys, D-029 listing): admin key only. Writes are leader-only
+// Tenancy routes (D-027 suspend, D-028 keys, D-029 listing): operators only (the admin key, or a
+// signed-in user whose role the guard checked, S11). Writes are leader-only
 // (503 not leader on a replica); listings answer on any node. Every mutation writes one audit row
 // and, where other nodes hold state, is propagated (Options.Propagate).
 
@@ -30,7 +31,8 @@ const (
 	maxLabelLen      = 200
 )
 
-// adminOnly answers 401 unless the caller presents the admin key.
+// adminOnly answers 401 unless the caller is an operator (the admin key or a signed-in user; the
+// route's guard already checked the role), never a project key.
 func (s *Server) adminOnly(w http.ResponseWriter, r *http.Request) bool {
 	if _, ok := s.authenticate(r, false); !ok {
 		s.fail(w, r, http.StatusUnauthorized, "unauthorized")
@@ -49,9 +51,14 @@ func (s *Server) pathID(w http.ResponseWriter, r *http.Request, name, what strin
 	return id, true
 }
 
-// audit records an admin-key mutation; auditAs one made with a project key.
-func (s *Server) audit(project uuid.UUID, action, subject string, detail map[string]string) {
-	s.auditAs("admin", project, action, subject, detail)
+// audit records an operator's mutation under the request's actor ("admin" for the bearer admin
+// key, "user:<uuid>" for a signed-in user, S11 criterion 8); auditAs takes the actor explicitly.
+func (s *Server) audit(r *http.Request, project uuid.UUID, action, subject string, detail map[string]string) {
+	actor := "admin"
+	if who, ok := s.authenticate(r, true); ok && who.actor != "" {
+		actor = who.actor
+	}
+	s.auditAs(actor, project, action, subject, detail)
 }
 
 func (s *Server) auditAs(actor string, project uuid.UUID, action, subject string, detail map[string]string) {
@@ -267,7 +274,7 @@ func (s *Server) issueKey(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "issue key", err, "project", project.String())
 		return
 	}
-	s.audit(project, "key_issued", key.ID.String(), map[string]string{"key_id": key.ID.String(), "key_prefix": key.Prefix})
+	s.audit(r, project, "key_issued", key.ID.String(), map[string]string{"key_id": key.ID.String(), "key_prefix": key.Prefix})
 	logger.L.Info("API: key issued", "project", project.String(), "key_id", key.ID.String(), "key_prefix", key.Prefix)
 	writeJSON(w, http.StatusCreated, protocol.IssuedKey{
 		KeyID: key.ID.String(), ProjectID: project.String(), APIKey: raw, KeyPrefix: key.Prefix, Label: key.Label,
@@ -303,7 +310,7 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := s.closeKeySessions(project, id)
-	s.audit(project, "key_revoked", id.String(), map[string]string{"key_id": id.String(), "sessions_closed": strconv.Itoa(n)})
+	s.audit(r, project, "key_revoked", id.String(), map[string]string{"key_id": id.String(), "sessions_closed": strconv.Itoa(n)})
 	logger.L.Info("API: key revoked", "project", project.String(), "key_id", id.String(), "sessions_closed", n)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -332,7 +339,7 @@ func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := s.closeKeySessions(project, old)
-	s.audit(project, "key_rotated", old.String(), map[string]string{
+	s.audit(r, project, "key_rotated", old.String(), map[string]string{
 		"key_id": old.String(), "new_key_id": next.ID.String(), "key_prefix": next.Prefix, "sessions_closed": strconv.Itoa(n),
 	})
 	logger.L.Info("API: key rotated", "project", project.String(), "key_id", old.String(),
@@ -367,14 +374,14 @@ func (s *Server) setSuspended(w http.ResponseWriter, r *http.Request, suspended 
 	s.tenants.SetSuspended(project, suspended)
 	if !suspended {
 		s.propagate(protocol.ReplicaControl{Type: protocol.TypeProjectResumed, Project: project.String()})
-		s.audit(project, "project_resumed", project.String(), nil)
+		s.audit(r, project, "project_resumed", project.String(), nil)
 		logger.L.Info("API: project resumed", "project", project.String())
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	n := s.sessions.KillWhere(session.Filter{Project: project}, protocol.CloseSuspended, protocol.CloseReasonSuspended)
 	s.propagate(protocol.ReplicaControl{Type: protocol.TypeProjectSuspended, Project: project.String()})
-	s.audit(project, "project_suspended", project.String(), map[string]string{"sessions_closed": strconv.Itoa(n)})
+	s.audit(r, project, "project_suspended", project.String(), map[string]string{"sessions_closed": strconv.Itoa(n)})
 	logger.L.Info("API: project suspended", "project", project.String(), "sessions_closed", n)
 	w.WriteHeader(http.StatusNoContent)
 }

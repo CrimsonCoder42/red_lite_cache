@@ -84,3 +84,7 @@ moving it to `DECISIONS.md` as a D-id.
 | Leaks: /health stats need the token | D-040 stats are sent in development only AND only when the caller passes the cluster token check (same gate as role/epoch, D-031; with no token configured everyone gets them) | none | no |
 | Leaks: L12 Sheets = 8 | the request's "Sheets = 10" counts the revoked project's two sheets, which a revoke drops (D-021); L12 asserts the 8 created and not revoked | none | no |
 | S5: retry | a size-triggered flush counts as "the next tick" for the one retry; the shutdown flush has no retry | a shutdown during a DB outage loses the last batch's durability | no |
+| S11: email shape | the admin email is an identifier, never mailed: only `x@y`, ≤ 254 bytes, no whitespace or NUL (`validEmail`) | a typo'd address is accepted | no |
+| S11: write timeout | the admin server's `WriteTimeout` is 30 s (S3 request); `GET /admin/sheets/{id}/export` of a very large sheet on a slow link could be cut | an export over 30 s fails | no — ⚠️ not yet tested |
+| S11: login CSRF | `POST /admin/auth/login` is public and not cross-origin checked (only cookie callers are); a cross-site page could sign a browser into an account whose password it knows | low: it cannot learn a session | no |
+| S11: refused cross-origin slides the session | the session check (which slides `last_seen_at`) runs before the cross-origin check | a refused request keeps an idle session alive | no |

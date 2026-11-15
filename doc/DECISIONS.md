@@ -338,3 +338,32 @@ See D-003; recorded separately because SCOPE K3 cites it.
 **Chosen** Every server-ended stream returns a status with a `redlite.v1.ErrorDetail{reason, message, close_code}` detail (our own message: no genproto dependency): SUSPENDED → PERMISSION_DENIED, KEY_REVOKED → UNAUTHENTICATED, KICKED → ABORTED, INVALID_PASSWORD / NOT_AUTHORIZED → UNAUTHENTICATED, STALE_EPOCH / NOT_LEADER → FAILED_PRECONDITION, MESSAGE_TOO_LARGE / SLOW_CONSUMER → RESOURCE_EXHAUSTED, anything else → UNAVAILABLE (a server-side drop is never a bare OK). A terminal code is only ever read from the detail; gRPC's own RESOURCE_EXHAUSTED (receive limit) maps to 1009. An empty or unknown `ClientMsg` body is answered `unknown action` and the stream stays up (forward compatible).
 **Alternatives + why lost** `google.rpc.ErrorInfo`: needs genproto. Status code alone: KEY_REVOKED and NOT_AUTHORIZED share UNAUTHENTICATED but one is terminal.
 **Consequences** The reader's terminal logic is wire-independent (`rpcwire.CloseCode`).
+
+<!-- admin_portal_2026-11-12 -->
+## D-051 Admin users sign in with a password hashed in Go; lockout, sessions and the latch are SQL (2026-11-12, accepted — Devin, admin portal D1)
+
+**Context** The admin port had one bearer key for everything (`internal/api/api.go`, D-049). Devin wants named admin users, salted hashes, and as much as sensibly possible in Postgres.
+**Chosen** bcrypt cost 12 in Go (`internal/adminauth`, `x/crypto` already a dependency); counters, lockout (5 → 15 min), session validity and the bootstrap latch in SQL functions (migration 000003, `db/query/admin/admin.sql`). Postgres never sees a password.
+**Alternatives + why lost** pgcrypto `crypt(pw, gen_salt('bf'))` + a SQL sign-in: the manual says passwords then travel in clear text between client and server ("connect locally or use SSL… else do crypto inside client application", pgcrypto F.26.8.3), compose runs `sslmode=disable`, bf defaults to cost 6, and a login flood becomes DB CPU; it also reversed `doc/persist/postgres_role.md:31`. Both store the same `$2a$` string, so the choice is reversible without a rehash.
+**Consequences** Two round trips per sign-in (read row, record attempt). An unknown email is compared against a dummy hash made once on the first sign-in, so every path costs one bcrypt.
+
+## D-052 Opaque session cookie, sha256 at rest, not JWT (2026-11-12, accepted — Devin, D2)
+
+**Chosen** 32 random bytes in `redlite_admin` (HttpOnly, SameSite=Strict, Path=/, Secure except in development), sha256 in `admin_sessions`, idle 30 min, absolute 12 h; logout, disable, reset and password change delete rows (instant revoke). Unsafe methods of cookie callers pass `http.CrossOriginProtection`.
+**Alternatives + why lost** advomedix's JWT + refresh in localStorage (`advomedix_admin/src/api/tokenManager.ts:12-53`): readable by any XSS, a blocked session lives 15 min (`backendAdvo/api/middleware/auth.go:83-89`), a refresh flow to maintain.
+**Consequences** One indexed UPDATE per portal request (slides `last_seen_at`); the cleaner tick purges dead rows (`internal/persist/admin_purge.go`).
+
+## D-053 Bootstrap: the bearer admin key + a one-row latch, 410 forever (2026-11-12, accepted — Devin, D3)
+
+**Chosen** `POST /admin/bootstrap` needs the admin key; `admin_bootstrap()` inserts latch row id=1 and the super_admin in one transaction; a second or concurrent call hits the PK → 410. The latch is never deleted. The admin key stays: super_admin with actor `admin` for `bootstrap.sh`, the peer node and break-glass.
+**Alternatives + why lost** An env flag on top (more config, no extra safety: the key is already the secret); advomedix's per-tenant count with no transaction (`backendAdvo/api/handlers/admin/bootstrap.go:70-98`): never disables, races.
+
+## D-054 Three fixed roles as a CHECK, a route table in Register (2026-11-12, accepted — Devin, D7, D8)
+
+**Chosen** viewer < admin < super_admin (`admin_users.role` CHECK); each route names its minimum role in `Register` (`internal/api/api.go:137`); sheet export is super_admin or the owner key; users are super_admin only; the last active super_admin cannot be demoted or disabled (rows locked `FOR UPDATE`).
+**Alternatives + why lost** advomedix's roles + permissions + role_permissions tables: three tables and a cache for three roles.
+
+## D-055 Admin rate limits in process with golang.org/x/time/rate; trusted proxy opt-in (2026-11-12, accepted — Devin, D5, D6)
+
+**Chosen** Token buckets per IP (20 rps / 40), per signed-in user (10 / 20), sign-in per IP (5/min); one map capped at 10 000 buckets with a 10-minute idle sweep owned by the app errgroup; a full map refuses new keys (fail closed) and sweeps at most once a second. The bearer admin key skips the per-IP bucket (the peer pages up to 25 requests per listing); a wrong key does not. `REDLITE_ADMIN_TRUSTED_PROXY` takes the last `X-Forwarded-For` hop only from a loopback peer.
+**Alternatives + why lost** Counters in Postgres (a write per request on the admin port; lockout is already there); a hand-rolled bucket (Devin allowed the one module). In-process means each node counts alone (2 nodes = 2× the limit) and a restart resets them — acceptable for admin traffic.

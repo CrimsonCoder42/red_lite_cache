@@ -31,6 +31,19 @@ control plane and the durable copy — never on the read or write path (D-019).
                                      └───────────────────────────────────────────────────────────────────────┘
 ```
 
+## Admin port request path (S11, D-051…D-055)
+
+Every `/admin/*` route is mounted through one guard (`internal/api/admin_auth.go:81`), in this order:
+network (bind address, firewall, Tailscale — outside the process) → TLS terminated in front (the port is
+plain HTTP, D-049) → `http.Server` limits (ReadHeader 10 s, Read 15 s, Write 30 s, Idle 60 s, headers
+16 KiB, `internal/app/app.go:252`) → per-IP bucket (skipped for the bearer admin key) and the sign-in
+bucket → 503 if the route needs Postgres and persistence is off → credential (Authorization header wins:
+admin key = super_admin, or a project key on S6 routes; else the `redlite_admin` cookie →
+`admin_session_check`) → `http.CrossOriginProtection` for cookie callers on unsafe methods → the route's
+minimum role → must-change-password → per-user bucket → handler (64 KiB body cap) → audit row
+(`user:<uuid>` or `admin`). One extra goroutine: the limiter's idle sweep (`adminauth.Limiter.Run`, in
+Run's errgroup). The cleaner tick also purges dead admin sessions (`persist.AdminSessionsPurge`).
+
 ## Startup order — the docker-compose development stack (D-047)
 
 `docker compose up -d` (`docker-compose.yml`): **postgres** (healthy = `pg_isready`; `docker/postgres/`

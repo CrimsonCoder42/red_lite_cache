@@ -1,6 +1,6 @@
 package api
 
-// Session routes (D-026, D-030): admin key only, answered on any node. A listing is this node's
+// Session routes (D-026, D-030): operators only (S11 guard), answered on any node. A listing is this node's
 // sessions plus the peer's (fetched with ?scope=local so it does not recurse), each tagged with the
 // node that holds it; a kill of a session not on this node is forwarded to the peer.
 
@@ -194,7 +194,7 @@ func (s *Server) killSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if sess, ok := s.sessions.Get(id); ok {
 		if sess.Kill(protocol.CloseKicked, protocol.CloseReasonKicked) {
-			s.audit(sess.Project(), "session_kick", id.String(), map[string]string{
+			s.audit(r, sess.Project(), "session_kick", id.String(), map[string]string{
 				"session": id.String(), "sheet": sess.Sheet(), "node": s.sessions.Node(),
 			})
 			logger.L.Info("API: session killed", "session", id.String(), "project", sess.Project().String(), "sheet", sess.Sheet())

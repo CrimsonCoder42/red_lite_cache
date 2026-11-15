@@ -24,6 +24,8 @@ x-redlite-env: &redlite-env
   REDLITE_CLUSTER_TOKEN: ${REDLITE_CLUSTER_TOKEN:-dev-cluster-token} # DEV ONLY default; same on both nodes (D-031)
   REDLITE_LOG_LEVEL: ${REDLITE_LOG_LEVEL:-info}
   REDLITE_ADMIN_PORT: ":8097" # admin REST + GET /health; the client port speaks gRPC (D-048)
+  # Admin portal (S11): uncomment behind a local TLS proxy on loopback.
+  # REDLITE_ADMIN_TRUSTED_PROXY: "true" # D6: last X-Forwarded-For hop when the request comes from loopback
 
 services:
   postgres:
@@ -56,6 +58,7 @@ services:
       REDLITE_ROLE: leader
       REDLITE_INSTANCE_ID: leader
       REDLITE_PEER_ADDRESS: replica:8096 # gRPC Replica.Probe; an absent replica is only a Debug line
+      REDLITE_PORTAL_DIR: /portal # D4: the admin portal at http://127.0.0.1:8097/portal/ (built into the image)
     depends_on:
       postgres: { condition: service_healthy }
     healthcheck:

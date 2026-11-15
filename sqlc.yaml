@@ -69,3 +69,17 @@ sql:
         emit_interface: true
         emit_empty_slices: true
         overrides: *overrides
+
+  # Admin portal: admin users, bootstrap latch, cookie sessions, the audit read (000003, S11)
+  - schema: "./db/migration"
+    queries: "./db/query/admin"
+    engine: "postgresql"
+    gen:
+      go:
+        package: "admin"
+        out: "./db/sqlc/admin"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        emit_empty_slices: true
+        overrides: *overrides

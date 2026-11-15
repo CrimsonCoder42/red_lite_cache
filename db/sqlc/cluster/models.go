@@ -6,11 +6,44 @@ package cluster
 
 import (
 	"encoding/json"
+	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type AdminBootstrap struct {
+	ID     int32     `json:"id"`
+	UserID uuid.UUID `json:"user_id"`
+	DoneAt time.Time `json:"done_at"`
+}
+
+type AdminSession struct {
+	TokenHash  []byte      `json:"token_hash"`
+	UserID     uuid.UUID   `json:"user_id"`
+	CreatedAt  time.Time   `json:"created_at"`
+	LastSeenAt time.Time   `json:"last_seen_at"`
+	ExpiresAt  time.Time   `json:"expires_at"`
+	Ip         *netip.Addr `json:"ip"`
+	UserAgent  string      `json:"user_agent"`
+}
+
+type AdminUser struct {
+	ID                 uuid.UUID          `json:"id"`
+	Email              string             `json:"email"`
+	Name               string             `json:"name"`
+	Role               string             `json:"role"`
+	PasswordHash       string             `json:"password_hash"`
+	MustChangePassword bool               `json:"must_change_password"`
+	FailedLogins       int32              `json:"failed_logins"`
+	LockedUntil        pgtype.Timestamptz `json:"locked_until"`
+	DisabledAt         pgtype.Timestamptz `json:"disabled_at"`
+	CreatedBy          pgtype.UUID        `json:"created_by"`
+	CreatedAt          time.Time          `json:"created_at"`
+	PasswordChangedAt  time.Time          `json:"password_changed_at"`
+	LastLoginAt        pgtype.Timestamptz `json:"last_login_at"`
+}
 
 type ApiKey struct {
 	ID         uuid.UUID          `json:"id"`

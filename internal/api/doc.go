@@ -11,6 +11,13 @@
 // POST /admin/projects/{id}/suspend|resume, GET /admin/sessions, GET /admin/sheets/{name}/sessions,
 // DELETE /admin/sessions/{id}. The full table is doc/specs/s6_api.md.
 //
+// Admin portal (S11, admin_auth.go, admin_users.go, admin_reads.go): every route goes through one
+// guard (rate limits, credential, role). "admin key" above now means an operator: the bearer admin
+// key (super_admin) or a signed-in user (session cookie) with the role doc/specs/s11_admin_portal.md
+// gives the route; export is super_admin or the owner key (D8). New: POST /admin/bootstrap,
+// POST /admin/auth/login|logout|password, GET /admin/auth/me, GET|POST /admin/users,
+// PATCH /admin/users/{id}, POST /admin/users/{id}/reset-password, GET /admin/stats, GET /admin/audit.
+//
 // Projects and keys live in PostgreSQL when persistence is on (DBStore) and in memory otherwise
 // (MemStore, lost on restart). Sheets live in sheet.Registry either way; the persist writer
 // records a created sheet through its OpCreate.

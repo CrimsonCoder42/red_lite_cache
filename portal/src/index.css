@@ -1,0 +1,494 @@
+/**
+ * Global styles - red_lite_cache admin portal.
+ *
+ * Copied from reference-admin/src/index.css (read-only reference), blocks kept verbatim:
+ *   lines 14-51   Tailwind import, :root base / gray / logo / status colours (the subset the copied
+ *                 components read: --color-success|warning|error|info, --color-gray-*, logo 500s)
+ *   lines 101-434 admin shell tokens (light), html.dark tokens, dark variant, keyframes, utilities,
+ *                 reduced-motion guard, scrollbar
+ *   lines 641-716 toast colours (the portal's own toast uses these class names; no react-toastify)
+ *   lines 740-756, 911-921 overlay fade + modal scale keyframes (the dialog's animation)
+ * Left behind: the remaining gradient palette (52-99, 436-640) and the rest of the modal system.
+ */
+
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * CSS CUSTOM PROPERTIES - Color System
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Base Colors */
+  --color-text-light: #11181C;
+  --color-text-dark: #ECEDEE;
+  --color-background-light: #fff;
+  --color-background-dark: #111827;
+
+  /* Gray Scale */
+  --color-gray-50: #F9FAFB;
+  --color-gray-100: #F3F4F6;
+  --color-gray-200: #E5E7EB;
+  --color-gray-300: #BFC4CD;
+  --color-gray-400: #9CA3AF;
+  --color-gray-500: #6B7280;
+  --color-gray-600: #4B5563;
+  --color-gray-700: #374151;
+  --color-gray-800: #1F2937;
+  --color-gray-900: #111827;
+
+  /* Logo Blue - Primary brand color */
+  --color-logo-blue-500: #0f70f0;
+  --color-logo-blue-400: #4099ff;
+
+  /* Logo Purple - Secondary brand color */
+  --color-logo-purple-500: #6240e8;
+  --color-logo-purple-400: #8a68f0;
+
+  /* Status Colors */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-info: #3B82F6;
+  /* ═════════════════════════════════════════════════════════════════════════
+   * ADMIN SHELL TOKENS -- the glassy template, made portable
+   *
+   * Source: reference-admin/glassy_ai_agents_saas_interactive_dashboard/
+   * (example.css / example.html / example.js). That folder defines ZERO custom
+   * properties -- every value below was a literal in it, and the file:line it
+   * came from is cited so the template stays the checkable source.
+   *
+   * These are LIGHT values. The dark set overrides them under `html.dark`,
+   * below this :root block. Semantic state colours are deliberately NOT
+   * redeclared: --color-success / --color-warning / --color-error /
+   * --color-info already exist above and the template's green / amber / rose /
+   * cyan map onto them. One token set, no duplicates.
+   * ═════════════════════════════════════════════════════════════════════════ */
+
+  /* Type -- example.css:2 (Inter), :11 (Manrope). The template's Google Fonts
+     <link> is commented out (example.html:3-5), so both need a real fallback. */
+  --admin-font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --admin-font-body: "Manrope", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  /* Page background -- example.css:26. Size and duration example.css:27,28. */
+  --admin-bg: linear-gradient(245deg, #f1f5f9, #f3f6ff, #eaf3ff, #e7ebf2);
+  --admin-bg-size: 400% 400%;
+  --admin-bg-duration: 25s;
+  --admin-fg: #1e293b;        /* example.css:29 -- slate-800 */
+  --admin-fg-muted: #64748b;  /* example.js:545 -- slate-500 */
+
+  /* Glass surface (sidebar, topbar) -- example.css:127 filter, :145-146 skin */
+  --admin-glass-blur: blur(16px) saturate(180%);
+  --admin-glass-bg: rgba(255, 255, 255, 0.5);
+  --admin-glass-border: rgba(0, 0, 0, 0.08);
+
+  /* Glass card -- example.css:195-199, hover :215 */
+  --admin-card-blur: blur(12px);
+  --admin-card-bg: rgba(255, 255, 255, 0.1);
+  --admin-card-border: rgba(255, 255, 255, 0.15);
+  --admin-card-bg-hover: rgba(255, 255, 255, 0.55);
+  --admin-card-border-hover: rgba(255, 255, 255, 0.15);
+
+  /* Background flares -- example.css:51,53 (blur + float), :61/:70 hues,
+     light-theme overrides :80-85 */
+  --admin-flare-a: #00ffff;
+  --admin-flare-a-opacity: 0.2;
+  --admin-flare-b: #a855f7;
+  --admin-flare-b-opacity: 0.25;
+  --admin-flare-blur: 150px;
+  --admin-flare-duration: 35s;
+  --admin-pointer-flare: rgba(0, 0, 0, 0.05);  /* example.css:119 */
+  --admin-pointer-flare-blur: 100px;           /* example.css:109 */
+
+  /* Radii -- example.css:198 (card), :259 (control) */
+  --admin-radius-card: 1rem;
+  --admin-radius-control: 0.75rem;
+  --admin-radius-pill: 9999px;
+
+  /* Shadow -- the template used Tailwind's shadow-lg only (example.html:478) */
+  --admin-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+
+  /* Accent -- example.html:125 (indigo-600 / indigo-700 hover), :36 (indigo-500) */
+  --admin-accent: #4f46e5;
+  --admin-accent-hover: #4338ca;
+  --admin-accent-soft: #6366f1;
+  --admin-on-accent: #ffffff;
+
+  /* Chart series -- example.js:615 is the template's categorical set; :586 and
+     :599 are its bar and line hues. A chart looks a series colour up here, it
+     never picks one (reference-mobile/shared/charts/chartTheme.tsx:8-14). */
+  --admin-series-1: #818cf8;
+  --admin-series-2: #67e8f9;
+  --admin-series-3: #f87171;
+  --admin-series-4: #fbbf24;
+  --admin-series-5: #a78bfa;
+  --admin-series-bar: #6366f1;   /* example.js:586 */
+  --admin-series-line: #22d3ee;  /* example.js:599 */
+
+  /* The dot halo. An OPAQUE surface colour: its job is to separate a dot from
+     the stroke underneath it, and a translucent card token would let the line
+     show through. Values from reference-mobile/shared/charts/LineChart.tsx:262,
+     which picks '#ffffff' / '#1e293b' by theme. */
+  --admin-card-halo: #ffffff;
+
+  /* Chart grid and ticks -- example.js:543,545 (the light half of each pair) */
+  --admin-chart-grid: rgba(226, 232, 240, 0.7);
+  --admin-chart-tick: #64748b;
+
+  /* Shell geometry -- example.html:31 (w-64), :118 (h-16), :134 (p-6 / lg:p-8) */
+  --admin-sidebar-w: 16rem;
+  --admin-topbar-h: 4rem;
+  --admin-content-pad: 1.5rem;
+  --admin-content-pad-lg: 2rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ADMIN SHELL -- DARK TOKENS
+ *
+ * One theme class. The template carried two parallel systems -- `html.dark` /
+ * `html.light` AND `body.dark-theme` / `body.light-theme`, both written on
+ * every toggle (example.js:11-23). Only `html.dark` survives the port, because
+ * it is also what Tailwind's dark variant and the fork's existing
+ * `.dark .modal-content` rules (index.css:544 and below) already key on.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+html.dark {
+  --admin-bg: linear-gradient(245deg, #0f172a, #131b31, #2e1a47, #0e1f4a); /* example.css:17 */
+  --admin-fg: #f8fafc;        /* example.css:20 -- slate-50 */
+  --admin-fg-muted: #94a3b8;  /* example.js:545 */
+
+  --admin-glass-bg: rgba(29, 39, 58, 0.4);      /* example.css:139 */
+  --admin-glass-border: rgba(255, 255, 255, 0.1);
+
+  --admin-card-bg: rgba(15, 23, 42, 0.3);       /* example.css:203 */
+  --admin-card-border: rgba(255, 255, 255, 0.08);
+  --admin-card-bg-hover: rgba(15, 23, 42, 0.5); /* example.css:224 */
+  --admin-card-border-hover: rgba(255, 255, 255, 0.12);
+
+  --admin-flare-a-opacity: 0.15;                /* example.css:63 */
+  --admin-flare-b: #ff00ff;                     /* example.css:70 */
+  --admin-flare-b-opacity: 0.2;
+  --admin-pointer-flare: rgba(255, 255, 255, 0.025); /* example.css:105 */
+
+  --admin-card-halo: #1e293b;                   /* mobile LineChart.tsx:262 */
+  --admin-chart-grid: rgba(51, 65, 85, 0.5);    /* example.js:543 */
+  --admin-chart-tick: #94a3b8;                  /* example.js:545 */
+}
+
+/**
+ * Tailwind v4 has no JS config, so the template's `tailwind.config = { darkMode:
+ * "class" }` (example.html:7-9) has no equivalent to copy. Without this line
+ * every `dark:` utility in the package follows the OS setting and ignores the
+ * class the app is toggling -- which is what it did before this file changed.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ADMIN SHELL -- KEYFRAMES
+ *
+ * `gradient-flow` is a BUG FIX carried over from the template: example.css:21
+ * and :31 both animate it, but its @keyframes block is commented out at
+ * example.css:35-45, so the background never moved. Restored here under a
+ * prefixed name.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes admin-gradient-flow {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* example.css:87-95 */
+@keyframes admin-flare-float {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  100% { transform: translate(150px, -200px) rotate(180deg); }
+}
+
+/**
+ * The chart draw-on. features/charts/chartTheme.tsx sizes the dash to the
+ * MEASURED path length and passes both ends in as custom properties, so one
+ * keyframe serves every line, area outline and arc in the library.
+ */
+@keyframes admin-chart-draw {
+  from { stroke-dashoffset: var(--admin-chart-dash, 0); }
+  to   { stroke-dashoffset: var(--admin-chart-dash-end, 0); }
+}
+
+/**
+ * A bar growing from its baseline. transform-box:fill-box + transform-origin:
+ * bottom are set on the <rect> itself (features/charts/BarChart.tsx), because an
+ * SVG transform defaults to the viewBox origin and the bar would slide in from
+ * the top-left corner instead of rising.
+ */
+@keyframes admin-chart-grow {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+@keyframes admin-chart-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes admin-skeleton-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.85; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ADMIN SHELL -- UTILITIES
+ * Every rule below reads tokens. No literal colour, radius or duration.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The shell's own painted ground. The template put this on <body>
+ * (example.css:15-32); here it is the shell element, so the legacy auth pages
+ * and any page that paints its own background are untouched by the port.
+ */
+.admin-shell {
+  position: relative;
+  min-height: 100vh;
+  isolation: isolate;
+  color: var(--admin-fg);
+  font-family: var(--admin-font-sans);
+  background: var(--admin-bg);
+  background-size: var(--admin-bg-size);
+  animation: admin-gradient-flow var(--admin-bg-duration) ease-in-out infinite;
+}
+
+.admin-shell p,
+.admin-shell .admin-body-text {
+  font-family: var(--admin-font-body); /* example.css:6-12 */
+}
+
+/* example.css:47-95 */
+.admin-flare {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(var(--admin-flare-blur));
+  animation: admin-flare-float var(--admin-flare-duration) ease-in-out infinite alternate;
+  z-index: -1;
+  pointer-events: none;
+  transition: opacity 1s ease-in-out;
+}
+
+.admin-flare--a {
+  width: 500px; height: 500px; top: 10%; left: 20%;
+  background: var(--admin-flare-a);
+  opacity: var(--admin-flare-a-opacity);
+}
+
+.admin-flare--b {
+  width: 400px; height: 400px; bottom: 10%; right: 15%;
+  background: var(--admin-flare-b);
+  opacity: var(--admin-flare-b-opacity);
+  animation-delay: 3s; /* example.css:73 */
+}
+
+/* example.css:98-121 -- follows the pointer, positioned from JS custom props. */
+.admin-pointer-flare {
+  position: fixed;
+  top: var(--admin-pointer-y, 50%);
+  left: var(--admin-pointer-x, 50%);
+  width: 350px; height: 350px;
+  background: radial-gradient(closest-side, var(--admin-pointer-flare), transparent 80%);
+  filter: blur(var(--admin-pointer-flare-blur));
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.3s ease-out, transform 0.1s linear;
+}
+
+/* example.css:126-146 */
+.admin-glass {
+  backdrop-filter: var(--admin-glass-blur);
+  -webkit-backdrop-filter: var(--admin-glass-blur);
+  background-color: var(--admin-glass-bg);
+  border: 1px solid var(--admin-glass-border);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+/* example.css:190-227 */
+.admin-card {
+  background: var(--admin-card-bg);
+  backdrop-filter: var(--admin-card-blur);
+  -webkit-backdrop-filter: var(--admin-card-blur);
+  border: 1px solid var(--admin-card-border);
+  border-radius: var(--admin-radius-card);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.admin-card--hoverable:hover {
+  background: var(--admin-card-bg-hover);
+  border-color: var(--admin-card-border-hover);
+}
+
+/**
+ * The status strip. The template asked for `grid-cols-24` (example.html:270),
+ * which is not a Tailwind class and was defined nowhere -- the 24 cells stacked.
+ * Declared properly here, and sized by its `--admin-strip-cells` so a 7-day or
+ * 30-day strip is the same component.
+ */
+.admin-strip {
+  display: grid;
+  grid-template-columns: repeat(var(--admin-strip-cells, 24), minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.admin-skeleton {
+  border-radius: var(--admin-radius-control);
+  background: var(--admin-card-bg-hover);
+  animation: admin-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+/**
+ * Screenshot and accessibility guard. Playwright's toHaveScreenshot freezes CSS
+ * animations at their END state, which for a 25s looping gradient is a frame
+ * nobody chose; the runner also sets reducedMotion:'reduce'
+ * (testing/admin/playwright.config.ts:57), so this pins every shell animation
+ * to a stable first frame instead.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .admin-shell,
+  .admin-flare,
+  .admin-skeleton,
+  .admin-chart [style*="admin-chart-draw"],
+  .admin-chart * {
+    animation: none !important;
+  }
+  .admin-shell { background-position: 0% 50%; }
+  .admin-pointer-flare { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SCROLLBAR STYLES
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
+html, body {
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html::-webkit-scrollbar, body::-webkit-scrollbar {
+  display: none;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * TOAST NOTIFICATION STYLES
+ * Maps to backend logger.go levels (Info, Warning, Error)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.Toastify__toast-container {
+  z-index: 9999;
+}
+
+.Toastify__toast {
+  border-radius: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+  padding: 16px;
+  box-shadow: rgba(0, 0, 0, 0.1) 0px 4px 12px 0px;
+}
+
+/* Success Toast - Brand gradient */
+.Toastify__toast--success {
+  background: linear-gradient(135deg, #0f70f0, #6240e8);
+  color: #fff;
+}
+
+.Toastify__toast--success .Toastify__progress-bar {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* Warning Toast - Yellow (4xx errors) */
+.Toastify__toast--warning {
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+  color: #111827;
+}
+
+.Toastify__toast--warning .Toastify__progress-bar {
+  background: rgba(17, 24, 39, 0.3);
+}
+
+/* Error Toast - Red (5xx errors) */
+.Toastify__toast--error {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: #fff;
+}
+
+.Toastify__toast--error .Toastify__progress-bar {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* Info Toast - Light blue */
+.Toastify__toast--info {
+  background: linear-gradient(135deg, #3b82f6, #60a5fa);
+  color: #fff;
+}
+
+.Toastify__toast--info .Toastify__progress-bar {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.Toastify__close-button {
+  color: inherit;
+  opacity: 0.7;
+}
+
+.Toastify__close-button:hover {
+  opacity: 1;
+}
+
+.Toastify__progress-bar {
+  height: 4px;
+}
+
+.Toastify__toast-body {
+  padding: 0;
+  white-space: pre-line;
+}
+
+
+/* reference-admin/src/index.css:740-756 */
+.modal-overlay-opening {
+  animation: overlay-fade-in 0.3s ease-out;
+}
+
+.modal-overlay-closing {
+  animation: overlay-fade-out 0.3s ease-out;
+}
+
+@keyframes overlay-fade-in {
+  from { opacity: 0; backdrop-filter: blur(0px); }
+  to { opacity: 1; backdrop-filter: blur(4px); }
+}
+
+@keyframes overlay-fade-out {
+  from { opacity: 1; backdrop-filter: blur(4px); }
+  to { opacity: 0; backdrop-filter: blur(0px); }
+}
+
+/* reference-admin/src/index.css:911-921 */
+@keyframes modal-scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes modal-scale-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.95); }
+}
+
+.modal-scale-in { animation: modal-scale-in 0.3s ease-out; }

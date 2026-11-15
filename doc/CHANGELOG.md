@@ -1,5 +1,22 @@
 # Changelog
 
+<!-- admin_portal_2026-11-12 -->
+- 2026-11-12 — **Admin portal backend (S11)** (`doc/admin_portal_2026-11-12/`, `doc/specs/s11_admin_portal.md`,
+  D-051…D-055). Migration 000003 (`admin_users`, `admin_bootstrap` latch, `admin_sessions`, six SQL functions;
+  applied by Devin) and `db/query/admin/admin.sql`. One guard on every `/admin` route
+  (`internal/api/admin_auth.go:81`, route table `internal/api/api.go:137`): admin key = super_admin, cookie
+  sessions (`resolve` :155), `http.CrossOriginProtection`, roles viewer < admin < super_admin, must-change.
+  `POST /admin/bootstrap` (:207, 410 forever), `/admin/auth/login` (:256, one reply for every failure, lockout
+  5 → 15 min), logout, me, password; users (`internal/api/admin_users.go:18-127`, last super_admin locked
+  `admin_store.go:239`); `GET /admin/stats` (peer-merged, `admin_reads.go:24`) and `GET /admin/audit`
+  (keyset, :66). Rate limits `internal/adminauth/limiter.go:89` (x/time/rate, map capped at 10 000, sweep
+  owned by the app errgroup `internal/app/app.go:277`), admin server timeouts (:252), sha256 admin-key compare
+  (`api.go:202`), `REDLITE_ADMIN_TRUSTED_PROXY` / `REDLITE_PORTAL_DIR` (`internal/config/config.go:99-104`),
+  session purge on the cleaner tick (`internal/app/wire_replica.go:226`). Makefile DB targets read
+  `REDLITE_PG_PASSWORD`/`REDLITE_HOST_PG_PORT` and never echo the URL; `make migrateversion`. New dependency:
+  `golang.org/x/time v0.16.0`. Harness with Postgres: 444 | 441 | 1 | 2, 0 DATA RACE (the one failure is the
+  pre-existing jsonb `TestPersistLoop`).
+
 - 2026-11-11 — **Fix: values over 1 MiB ended the session.** The server's default receive limit
   (`REDLITE_MAX_FRAME_BYTES`) was 1 MiB, so a 1.1 MiB set ended the session `RESOURCE_EXHAUSTED`
   ("received message larger than max (1176241 vs. 1048576)") and the reader reconnected. The default

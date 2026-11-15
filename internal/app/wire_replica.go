@@ -222,7 +222,8 @@ func (a *App) runReplicaPersist(g *errgroup.Group, gctx context.Context) {
 			})
 			pg.Go(func() error {
 				return persist.RunCleaner(w.persistCtx, w.store, a.cfg.PersistCleanupInterval,
-					rec.Pass, a.reconcileSuspended, a.ensureAuditPartitions)
+					rec.Pass, a.reconcileSuspended, a.ensureAuditPartitions,
+					persist.AdminSessionsPurge(w.store)) // admin portal (S11): expired/idle admin sessions
 			})
 			if a.cfg.ControlListen {
 				pg.Go(func() error { return persist.RunControlListener(pctx, w.store, a.applyControl) })

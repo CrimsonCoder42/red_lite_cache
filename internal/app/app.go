@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/CrimsonCoder42/red_lite_cache/internal/adminauth"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/api"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/cache"
 	"github.com/CrimsonCoder42/red_lite_cache/internal/config"
@@ -50,6 +51,10 @@ type App struct {
 	projects api.Store         // projects and keys: Postgres with persistence, else memory
 	tenants  *tenant.Directory // admission + suspension + revoked names (D-024, D-025, D-027)
 	sessions *session.Registry // this node's live sessions (D-026)
+
+	// ── admin portal (S11) ──
+	adminLimiter *adminauth.Limiter // the admin port's rate limits; its sweep runs in Run's errgroup
+	// ── end admin portal ──
 }
 
 // Tenants is the admission directory every open consults.
@@ -137,11 +142,31 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	// ── admin portal (S11): users and sessions in Postgres (nil without persistence: those routes
+	// answer 503), the rate limiter, D6, the Secure cookie outside development, GET /admin/stats.
+	a.adminLimiter = adminauth.NewLimiter(adminauth.DefaultLimits(), nil)
+	admOpts.Limiter = a.adminLimiter
+	admOpts.TrustedProxy = cfg.AdminTrustedProxy
+	admOpts.SecureCookie = cfg.Environment != "development"
+	admOpts.Stats = a.nodeStats
+	if store := a.Store(); store != nil {
+		admOpts.Admin = api.NewAdminDB(store)
+	}
+	// ── end admin portal ──
 	adm := api.New(a.reg, a.projects, cfg.AdminKey, a.node.IsLeader, admOpts)
 	if wr := a.Writer(); wr != nil {
 		adm.OnRevoke(wr.RevokeProject) // queued ops of revoked sheets never reach Postgres
 	}
 	adm.Register(a.mux)
+	// ── admin portal static files (D4): REDLITE_PORTAL_DIR at /portal/; empty = not served ──
+	if cfg.PortalDir != "" {
+		ph, err := api.PortalHandler(cfg.PortalDir)
+		if err != nil {
+			return nil, err
+		}
+		api.RegisterPortal(a.mux, ph)
+		logger.L.Info("App: portal served", "path", api.PortalPrefix)
+	}
 	return a, nil
 }
 
@@ -186,6 +211,12 @@ func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(h)
 }
 
+// nodeStats is this node's GET /admin/stats entry (S11): role, epoch, instance and the D-040
+// counts, for an authenticated operator in every environment (/health keeps them development-only).
+func (a *App) nodeStats() api.NodeStats {
+	return api.NodeStats{Role: a.role(), Epoch: a.node.Epoch(), InstanceID: a.instanceID, Stats: a.Stats()}
+}
+
 // QueuedFrames is the number of frames waiting in every client connection's send queue.
 func (a *App) QueuedFrames() int { return a.clients.QueuedFrames() }
 
@@ -226,7 +257,11 @@ func (a *App) Run(ctx context.Context, ln, adminLn net.Listener) error { // admi
 		}
 		adminLn = l
 	}
-	adminSrv := &http.Server{Handler: a.mux, ReadHeaderTimeout: 10 * time.Second}
+	// Admin server limits (S11 S3): a slow or idle client cannot hold a connection open.
+	adminSrv := &http.Server{
+		Handler: a.mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
 	g, gctx := errgroup.WithContext(ctx)
 
 	serveHTTP := func(srv *http.Server, l net.Listener, what string) error {
@@ -248,6 +283,7 @@ func (a *App) Run(ctx context.Context, ln, adminLn net.Listener) error { // admi
 	})
 	g.Go(func() error { return sheet.RunJanitor(gctx, a.reg, a.cfg.CacheJanitorInterval, a.node.IsLeader) })
 	g.Go(func() error { return a.locks.RunCleaner(gctx, a.cfg.LockCleanupInterval) })
+	g.Go(func() error { return a.adminLimiter.Run(gctx) }) // S11: idle-bucket sweep
 
 	// ── replica + persist wiring ──
 	// The replica node, the persist writer and the persist TTL cleaner, on gctx; the pool closes

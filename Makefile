@@ -3,16 +3,20 @@
 -include .env
 export
 
+# The compose database (docker-compose.yml postgres): password and host port from .env, the same
+# defaults compose uses. The URLs carry the password, so the recipes that use them start with @.
+REDLITE_PG_PASSWORD  ?= postgres
+REDLITE_HOST_PG_PORT ?= 5434
 DB_NAME        ?= redlite
-DB_URL         ?= postgres://postgres:postgres@127.0.0.1:5434/$(DB_NAME)?sslmode=disable
-TEST_DB_URL    ?= postgres://postgres:postgres@127.0.0.1:5434/redlite_test?sslmode=disable
+DB_URL         ?= postgres://postgres:$(REDLITE_PG_PASSWORD)@127.0.0.1:$(REDLITE_HOST_PG_PORT)/$(DB_NAME)?sslmode=disable
+TEST_DB_URL    ?= postgres://postgres:$(REDLITE_PG_PASSWORD)@127.0.0.1:$(REDLITE_HOST_PG_PORT)/redlite_test?sslmode=disable
 LEADER_PORT    ?= :8095
 REPLICA_PORT   ?= :8096
 LEADER_ADMIN   ?= :8097
 REPLICA_ADMIN  ?= :8098
 
-.PHONY: proto up cluster down wipe logs smoke test-persist postgres createdb dropdb c_m migrateup migratedown \
-        sqlc test bench server dev dev-pair dev-leader dev-replica clean db_start db_reset fresh_start build vet
+.PHONY: proto up cluster down wipe logs smoke test-persist postgres createdb dropdb c_m migrateup migrateversion migratedown \
+        sqlc portal-dev test bench server dev dev-pair dev-leader dev-replica clean db_start db_reset fresh_start build vet
 
 # Create a new migration pair: make c_m name=add_x
 c_m:
@@ -49,7 +53,7 @@ smoke:
 
 # The harness with the persistence tests on (needs `make up`: redlite_test on 127.0.0.1:5434).
 test-persist:
-	REDLITE_TEST_DATABASE_URL="$(TEST_DB_URL)" bash testing/run.sh
+	@REDLITE_TEST_DATABASE_URL="$(TEST_DB_URL)" bash testing/run.sh
 
 # Postgres only.
 postgres:
@@ -57,24 +61,33 @@ postgres:
 
 clean: wipe
 
+# PGPASSWORD goes into the container by name only (-e PGPASSWORD), never on a command line.
 createdb:
-	docker compose exec postgres createdb --username=postgres --owner=postgres $(DB_NAME)
+	@PGPASSWORD="$(REDLITE_PG_PASSWORD)" docker compose exec -e PGPASSWORD postgres createdb --host=127.0.0.1 --username=postgres --owner=postgres $(DB_NAME)
 
 dropdb:
-	docker compose exec postgres dropdb --username=postgres $(DB_NAME)
+	@PGPASSWORD="$(REDLITE_PG_PASSWORD)" docker compose exec -e PGPASSWORD postgres dropdb --host=127.0.0.1 --username=postgres $(DB_NAME)
 
 # The binary migrates itself at boot when REDLITE_PERSIST_ENABLED=true; these are for manual use.
 migrateup:
-	migrate -path db/migration -database "$(DB_URL)" -verbose up
+	@migrate -path db/migration -database "$(DB_URL)" -verbose up
+
+migrateversion:  # the version golang-migrate recorded (schema_migrations), and whether it is dirty
+	@migrate -path db/migration -database "$(DB_URL)" version
 
 migratedown:
 ifndef n
 	$(error Usage: make migratedown n=<number> — you must specify how many migrations to roll back)
 endif
-	migrate -path db/migration -database "$(DB_URL)" -verbose down $(n)
+	@migrate -path db/migration -database "$(DB_URL)" -verbose down $(n)
 
 sqlc:
 	sqlc generate
+
+# The admin portal in development (S11 portal wave): Vite on 127.0.0.1:5180, /admin proxied to the
+# leader's admin port 8097 (portal/vite.config.ts). Open http://localhost:5180/portal/.
+portal-dev:
+	cd portal && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run dev
 
 # The wire contract (D-048): regenerate protocol/redlitev1 from proto/ and record the .proto hash
 # that protocol/redlitev1's staleness test checks.

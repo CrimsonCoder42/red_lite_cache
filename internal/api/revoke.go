@@ -71,7 +71,7 @@ func (d *DBStore) RevokeProject(ctx context.Context, id uuid.UUID) ([]string, er
 	return names, nil
 }
 
-// revokeProject answers POST /admin/projects/{id}/revoke (admin key; leader only): revoke every key
+// revokeProject answers POST /admin/projects/{id}/revoke (operator, role admin; leader only): revoke every key
 // of the project, delete its sheets, drop them from this registry and kick their collaborators.
 // 204 on success.
 func (s *Server) revokeProject(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +127,7 @@ func (s *Server) revokeProject(w http.ResponseWriter, r *http.Request) {
 		dropped = append(dropped, late...)
 	}
 	s.tenants.MarkRevoked(dropped...) // autocreate never recreates them (D-025)
-	s.audit(project, "project_revoked", project.String(), map[string]string{"sheets_dropped": strconv.Itoa(len(dropped))})
+	s.audit(r, project, "project_revoked", project.String(), map[string]string{"sheets_dropped": strconv.Itoa(len(dropped))})
 	logger.L.Info("API: project revoked", "project", project.String(), "sheets_dropped", len(dropped))
 	w.WriteHeader(http.StatusNoContent)
 }

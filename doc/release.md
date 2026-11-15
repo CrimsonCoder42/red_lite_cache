@@ -96,6 +96,25 @@ restart them (replica first, then the leader; readers fail over and back). There
 **Rotating the cluster token** is the same, and the two nodes must restart close together: a replica
 with the old token is refused by a leader with the new one until both match.
 
+## Admin portal: first super admin, lock-down, break-glass (S11, D-053)
+
+Needs persistence (`REDLITE_PERSIST_ENABLED=true`, migration 000003). The curl sequence is
+`doc/admin_portal_2026-11-12/WALKTHROUGH.md` (bodies from files, the key from a curl config file).
+
+1. Bind the admin port privately: `REDLITE_ADMIN_PORT=127.0.0.1:8097` (or the Tailscale IP), firewall
+   8097/8098; terminate TLS in front (`tailscale serve`, Caddy) and set `REDLITE_ADMIN_TRUSTED_PROXY=true`.
+   The session cookie is `Secure` outside development, so the portal needs HTTPS.
+2. `POST /admin/bootstrap` once with the admin key → the first super_admin; every later call is 410.
+3. Sign in (`POST /admin/auth/login`), confirm a second bootstrap is 410.
+4. Rotate `REDLITE_ADMIN_KEY` on both nodes (above): the bootstrap value was typed into a shell. The
+   key stays for `bootstrap.sh`, the peer node and break-glass.
+5. Optional: a second super_admin (`POST /admin/users` with `"role":"super_admin"`).
+6. `GET /admin/audit` shows `admin_bootstrap` and `admin_login`.
+
+**Break-glass** (forgotten password, lockout of every super_admin): the admin key acts as super_admin —
+`POST /admin/users/{id}/reset-password` returns a temporary password (shown once; must be changed at the
+first sign-in). A lockout also ends by itself after 15 minutes.
+
 ## Tagging (Devin runs these; agents never run git writes)
 
 ```bash
